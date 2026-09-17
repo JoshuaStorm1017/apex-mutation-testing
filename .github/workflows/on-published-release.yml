@@ -11,7 +11,10 @@ permissions: # required if repository sets restricted permissions for token, see
   pull-requests: write # required if active on pull requests
 
 jobs:
+  # Upstream-only: the comment advertises scolladon's sponsorship link and the
+  # upstream npm package name, neither of which belongs on a fork release.
   release:
+    if: github.repository == 'scolladon/apex-mutation-testing'
     runs-on: ubuntu-latest
     steps:
       - uses: apexskier/github-release-commenter@v1

@@ -147,8 +147,12 @@ jobs:
   build:
     uses: ./.github/workflows/reusable-build.yml
 
+  # Upstream-only: publishes benchmark data/comments under scolladon's identity
+  # and history. Never runs on a fork so a fork run cannot post perf comments
+  # or push to a gh-pages it does not own.
   perf:
     needs: [build]
+    if: github.repository == 'scolladon/apex-mutation-testing'
     permissions:
       contents: read
       pull-requests: write
@@ -164,9 +168,14 @@ jobs:
   #   1. the pkg.pr.new GitHub App must be installed, or this job 404s;
   #   2. fork pull request approval gates who may publish under this package
   #      name - the GitHub default covers first-time contributors only.
+  #
+  # Upstream-only: a fork has no pkg.pr.new App installation and must never
+  # attempt a registry-adjacent publish under the upstream package name.
   preview:
     needs: [build]
-    if: github.actor != 'dependabot[bot]'
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.repository == 'scolladon/apex-mutation-testing'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -197,9 +206,12 @@ jobs:
   # checks out nothing and runs no repository code. A failed comment must also
   # not skip the e2e matrix, which fans out from preview independently.
   # Skipped for fork pull requests, whose token is read-only regardless.
+  # Upstream-only: never post an install-command comment from this fork.
   comment:
     needs: [preview]
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.repository == 'scolladon/apex-mutation-testing'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -215,8 +227,12 @@ jobs:
           comment-tag: dev-publish
           mode: recreate
 
+  # Upstream-only: depends on `preview`'s published channel, which does not
+  # exist on a fork run (see `preview` above), and org-e2e needs upstream's
+  # SFDX_AUTH_URL secret, which a fork must never be granted.
   e2e-tests:
     needs: [preview]
+    if: github.repository == 'scolladon/apex-mutation-testing'
     permissions:
       contents: read
     uses: ./.github/workflows/run-e2e-tests.yml

@@ -1,0 +1,62 @@
+---
+# Fork-only offline CI. Runs on every push/PR in this fork regardless of
+# github.repository (the guards on the inherited upstream workflows are the
+# other direction: they keep release/perf/npm-publish jobs from ever running
+# HERE). This workflow never installs a Salesforce CLI, authenticates to an
+# org, publishes a package, writes to gh-pages, or comments on a PR — every
+# step is local build/lint/test/package, exactly what `npm ci && npm run
+# build/lint/test` would do on a contributor's own machine.
+name: Fork CI (offline)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+
+      - name: Setup dependencies, cache and install
+        uses: ./.github/actions/install
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: NUT tests (offline paths only)
+        run: npm run test:nut
+
+      - name: Package (npm pack, no publish)
+        run: npm pack
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fork-coverage-report
+          path: reports/coverage

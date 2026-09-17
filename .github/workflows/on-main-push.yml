@@ -16,8 +16,12 @@ jobs:
   build:
     uses: ./.github/workflows/reusable-build.yml
 
+  # Upstream-only: opens release PRs and cuts releases against upstream's
+  # RELEASE_PAT and release history. A fork has neither the secret nor any
+  # business proposing releases of the upstream package.
   prepare-release:
     needs: [build]
+    if: github.repository == 'scolladon/apex-mutation-testing'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -31,9 +35,12 @@ jobs:
           token: ${{ secrets.RELEASE_PAT }}
           release-type: node
 
+  # Upstream-only: auto-push writes benchmark history to upstream's gh-pages.
   perf:
     needs: [prepare-release]
-    if: ${{ needs.prepare-release.outputs.release_created != 'true' }}
+    if: >-
+      needs.prepare-release.outputs.release_created != 'true' &&
+      github.repository == 'scolladon/apex-mutation-testing'
     uses: ./.github/workflows/reusable-perf.yml
     permissions:
       # auto-push writes the benchmark history to gh-pages. No pull-requests scope:
