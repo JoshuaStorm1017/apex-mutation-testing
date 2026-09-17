@@ -10,6 +10,7 @@ const mockMessages = vi.hoisted(() => ({
       'info.reasonNotAccessible': 'it is not accessible on this org',
       'info.reasonNoCoverage': 'it contributed no covered lines',
       'info.syncTransportFallback': `Synchronous test execution is unavailable (${tokens?.[0]}). Falling back to the asynchronous transport.`,
+      'info.campaignIncomplete': `Mutation testing stopped early: ${tokens?.[0]} of ${tokens?.[1]} planned mutation(s) were evaluated. The remaining ${tokens?.[2]} were never attempted and do not appear in the report.`,
     }
     return templates[key] ?? 'mock message'
   }),
@@ -1388,7 +1389,9 @@ describe('apex mutation test run NUT', () => {
       ).rejects.toThrow('error.scoreUnavailable')
       expect(mockMessages.createError).toHaveBeenCalledWith(
         'error.scoreUnavailable',
-        ['1']
+        [
+          '1 of 2 evaluated mutant(s) hit an infrastructure error (network, authentication, deploy/poll timeout, or similar) or produced no conclusive test evidence',
+        ]
       )
     })
 
@@ -1437,6 +1440,89 @@ describe('apex mutation test run NUT', () => {
         runDryRunCommand(['-c', 'MyClass', '-t', 'MyClassTest'])
       ).resolves.not.toThrow()
       expect(hasOperationalErrors).not.toHaveBeenCalled()
+    })
+
+    it('When zero mutants were evaluated at all, Then the command fails with a message naming that, not a 0% score', async () => {
+      // Arrange — the real MutationTestingService.hasOperationalErrors
+      // returns true for an empty mutants array (see
+      // mutationTestingService.test.ts); this proves the CLI phrases it
+      // distinctly from the "some hit an infra error" case.
+      vi.mocked(MutationTestingService).mockImplementation(
+        class {
+          process = vi.fn().mockResolvedValue({
+            sourceFile: 'MyClass',
+            sourceFileContent: 'class MyClass {}',
+            testFiles: ['MyClassTest'],
+            mutants: [],
+          } as never)
+          calculateScore = vi.fn().mockReturnValue(0)
+          hasOperationalErrors = vi.fn().mockReturnValue(true)
+        }
+      )
+
+      // Act & Assert
+      await expect(
+        runCommand(['-c', 'MyClass', '-t', 'MyClassTest'])
+      ).rejects.toThrow('error.scoreUnavailable')
+      expect(mockMessages.createError).toHaveBeenCalledWith(
+        'error.scoreUnavailable',
+        ['no mutants were evaluated']
+      )
+    })
+
+    it('When every evaluated mutant failed to compile, Then the command fails with a message naming that, not a 0% score', async () => {
+      vi.mocked(MutationTestingService).mockImplementation(
+        class {
+          process = vi.fn().mockResolvedValue({
+            sourceFile: 'MyClass',
+            sourceFileContent: 'class MyClass {}',
+            testFiles: ['MyClassTest'],
+            mutants: [{ status: 'CompileError' }, { status: 'CompileError' }],
+          } as never)
+          calculateScore = vi.fn().mockReturnValue(0)
+          hasOperationalErrors = vi.fn().mockReturnValue(true)
+        }
+      )
+
+      // Act & Assert
+      await expect(
+        runCommand(['-c', 'MyClass', '-t', 'MyClassTest'])
+      ).rejects.toThrow('error.scoreUnavailable')
+      expect(mockMessages.createError).toHaveBeenCalledWith(
+        'error.scoreUnavailable',
+        [
+          'all 2 evaluated mutant(s) failed to compile - none produced usable test evidence',
+        ]
+      )
+    })
+
+    it('When the campaign stopped early, Then this.warn names how many of how many planned mutations were evaluated', async () => {
+      // Arrange
+      vi.mocked(MutationTestingService).mockImplementation(
+        class {
+          process = vi.fn().mockResolvedValue({
+            sourceFile: 'MyClass',
+            sourceFileContent: 'class MyClass {}',
+            testFiles: ['MyClassTest'],
+            incomplete: { evaluatedCount: 1, plannedCount: 3 },
+            mutants: [{ status: 'RuntimeError' }],
+          } as never)
+          calculateScore = vi.fn().mockReturnValue(0)
+          hasOperationalErrors = vi.fn().mockReturnValue(true)
+        }
+      )
+
+      // Act
+      const sut = buildCommand(['-c', 'MyClass', '-t', 'MyClassTest'])
+      await sut.run().catch(() => {
+        // The operational-error throw is expected and covered elsewhere —
+        // this test is only about the warning that precedes it.
+      })
+
+      // Assert
+      expect(sut.warn).toHaveBeenCalledWith(
+        'Mutation testing stopped early: 1 of 3 planned mutation(s) were evaluated. The remaining 2 were never attempted and do not appear in the report.'
+      )
     })
   })
 

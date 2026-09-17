@@ -74,7 +74,11 @@ export class ApexMutationHTMLReporter {
     await assertRealPathWithinCwd(resolvedDir, outputDir, this.messages)
     const reportData = this.transformApexResults(apexMutationTestResult)
     const bundle = await loadMutationTestElements()
-    const htmlContent = createReportHtml(reportData, bundle)
+    const htmlContent = createReportHtml(
+      reportData,
+      bundle,
+      apexMutationTestResult.incomplete
+    )
     await writeReportAtomically(resolvedDir, htmlContent)
   }
 
@@ -91,7 +95,14 @@ export class ApexMutationHTMLReporter {
     )
     const mutationTestResult: MutationTestResult = {
       schemaVersion: '2.0.0',
-      config: {},
+      // Free-form per the schema; `incomplete` is this reporter's own
+      // addition (not a Stryker field) so a JSON consumer of the report data
+      // — not just a reader of the HTML banner — can also tell the campaign
+      // stopped early rather than inferring it from a mutant count that
+      // looks smaller than expected.
+      config: apexMutationTestResult.incomplete
+        ? { incomplete: apexMutationTestResult.incomplete }
+        : {},
       thresholds: {
         high: 80,
         low: 60,
@@ -264,6 +275,13 @@ async function assertRealPathWithinCwd(
 // the same directory and renaming it over the final path is symlink-safe by
 // construction, not just atomic. The temp name is random so two concurrent
 // report writes (unlikely, but free to guard) never collide.
+//
+// Mode 0600 (owner read/write only), not the world-readable 0644 a static
+// asset would normally get: this file embeds the full source of the class
+// under test plus every test class/method name it names in `coveredBy` and
+// `killedBy` — identities of the codebase, not just a rendering of public
+// results. Defaults closed; whoever wants to share the report can loosen
+// the permission themselves.
 async function writeReportAtomically(
   resolvedDir: string,
   content: string
@@ -274,7 +292,7 @@ async function writeReportAtomically(
     `.index.html.tmp-${randomBytes(8).toString('hex')}`
   )
   try {
-    await writeFile(tmpPath, content, { mode: 0o644 })
+    await writeFile(tmpPath, content, { mode: 0o600 })
     await rename(tmpPath, finalPath)
   } catch (error: unknown) {
     await unlink(tmpPath).catch(() => {
@@ -286,9 +304,26 @@ async function writeReportAtomically(
   }
 }
 
-const createReportHtml = (report: unknown, elementsBundle: string): string => {
+// `incomplete` renders as a plain, unmissable banner above the vendored
+// report app rather than something threaded into that app's own UI: the
+// vendored web component has no API for it, and patching the vendored
+// bundle to add one would be a much larger, riskier change for a fork whose
+// job here is "make the incompleteness visible", not "extend the viewer".
+// evaluatedCount/plannedCount are integers computed internally
+// (executeMutationLoop), never org- or user-supplied text, so interpolating
+// them directly needs no escaping.
+const createReportHtml = (
+  report: unknown,
+  elementsBundle: string,
+  incomplete?: { evaluatedCount: number; plannedCount: number }
+): string => {
   const safeJson = serializeReportForScript(report)
   const safeBundle = neutraliseScriptContent(elementsBundle)
+  const incompleteBanner = incomplete
+    ? `<div style="background:#7a1f1f;color:#fff;padding:12px 16px;font:14px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;border-bottom:3px solid #4a0f0f;">
+      <strong>Incomplete run:</strong> ${incomplete.evaluatedCount} of ${incomplete.plannedCount} planned mutations were evaluated before the campaign stopped early (see the command output for why). The remaining ${incomplete.plannedCount - incomplete.evaluatedCount} mutation(s) were never attempted and do not appear below.
+    </div>`
+    : ''
   return `<!DOCTYPE html>
   <html>
   <head>
@@ -297,6 +332,7 @@ const createReportHtml = (report: unknown, elementsBundle: string): string => {
     <script>${safeBundle}</script>
   </head>
   <body>
+    ${incompleteBanner}
     <mutation-test-report-app titlePostfix="apex-mutation-testing">
       Your browser doesn't support <a href="https://caniuse.com/#search=custom%20elements">custom elements</a>.
       Please use a latest version of an evergreen browser (Firefox, Chrome, Safari, Opera, Edge, etc).

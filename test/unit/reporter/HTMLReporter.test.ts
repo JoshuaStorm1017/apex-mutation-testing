@@ -171,7 +171,7 @@ describe('HTMLReporter', () => {
       expect(writeFile).toHaveBeenCalledWith(
         expect.any(String),
         expect.stringContaining('<html>'),
-        expect.objectContaining({ mode: 0o644 })
+        expect.objectContaining({ mode: 0o600 })
       )
     })
 

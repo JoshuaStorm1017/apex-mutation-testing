@@ -167,6 +167,40 @@ describe('GroupExecutor', () => {
       )
     })
 
+    it('When one mutant in the group has no conclusive evidence (a CompileFail row, not a Pass or Fail), Then the group summary counts it separately from killed and survived', async () => {
+      // Arrange — same group, but testB's row is CompileFail instead of
+      // Pass: inconclusive, not a survival.
+      runTestMethodsMock = vi.fn().mockResolvedValue({
+        outcome: 'Failed',
+        tests: [
+          testOf('testA', 'Fail'),
+          testOf('testB', 'CompileFail'),
+          testOf('testC', 'Fail'),
+        ],
+      } as unknown as ApexTestRunResult)
+      const sut = buildSut(testMethodsPerLine)
+
+      // Act
+      const { mutantResults: results } = await sut.evaluate(
+        group,
+        5,
+        performance.now(),
+        12
+      )
+
+      // Assert
+      expect(results.map(r => r.status)).toEqual([
+        'Killed',
+        'RuntimeError',
+        'Killed',
+      ])
+      expect(infoMessages()).toContainEqual(
+        expect.stringContaining(
+          'Group of 3 evaluated: 2 killed, 0 survived, 1 inconclusive'
+        )
+      )
+    })
+
     it('When the group completes, Then progress advances by the group size', async () => {
       // Arrange — starting at 5 with a group of 3 lands on 8; subtracting
       // instead would report 2.

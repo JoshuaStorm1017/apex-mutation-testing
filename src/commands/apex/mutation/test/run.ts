@@ -70,6 +70,25 @@ function renderTargetClassError(error: unknown): never {
   throw error
 }
 
+// Builds the one free-text fragment error.scoreUnavailable interpolates.
+// Only called when mutationTestingService.hasOperationalErrors is true, so
+// exactly one of these three cases holds.
+function describeUnavailableScore(result: MutationProcessResult): string {
+  if (result.mutants.length === 0) {
+    return 'no mutants were evaluated'
+  }
+  const inconclusive = result.mutants.filter(
+    m => m.status === 'RuntimeError'
+  ).length
+  if (inconclusive === 0) {
+    // Every evaluated mutant is invalid (CompileError) with none
+    // RuntimeError: calculateScore's denominator is empty, so there is
+    // nothing to compute a real score from.
+    return `all ${result.mutants.length} evaluated mutant(s) failed to compile - none produced usable test evidence`
+  }
+  return `${inconclusive} of ${result.mutants.length} evaluated mutant(s) hit an infrastructure error (network, authentication, deploy/poll timeout, or similar) or produced no conclusive test evidence`
+}
+
 export default class ApexMutationTest extends SfCommand<ApexMutationTestResult> {
   public static override readonly summary = messages.getMessage('summary')
   public static override readonly description =
@@ -211,21 +230,34 @@ export default class ApexMutationTest extends SfCommand<ApexMutationTestResult> 
 
     await this.publishReport(mutationResult, resolvedParameters.reportDir)
 
+    if (mutationResult.incomplete) {
+      // Mutations the campaign never reached are absent from
+      // mutationResult.mutants entirely (see executeMutationLoop) — this is
+      // the only place their existence is surfaced, so it must be explicit
+      // rather than the report silently looking smaller than planned.
+      const { evaluatedCount, plannedCount } = mutationResult.incomplete
+      this.warn(
+        messages.getMessage('info.campaignIncomplete', [
+          String(evaluatedCount),
+          String(plannedCount),
+          String(plannedCount - evaluatedCount),
+        ])
+      )
+    }
+
     if (
       !resolvedParameters.dryRun &&
       mutationTestingService.hasOperationalErrors(mutationResult)
     ) {
-      // An infrastructure error (network, auth, poll timeout) makes the
-      // evidence for at least one mutant incomplete — the report above still
-      // lists every mutant's real status and reason, but no numeric score
-      // can be trusted, and the command must fail regardless of whether the
-      // remaining, genuinely-evaluated mutants alone would have cleared the
-      // configured threshold. See mutationTestingService.calculateScore.
-      const operationalErrorCount = mutationResult.mutants.filter(
-        m => m.status === 'RuntimeError'
-      ).length
+      // Either a mutant hit an infrastructure error or produced no
+      // conclusive test evidence, or nothing was scoreable at all (see
+      // mutationTestingService.hasOperationalErrors) — the report above
+      // still lists every evaluated mutant's real status and reason, but no
+      // numeric score can be trusted, and the command must fail regardless
+      // of whether the remaining, genuinely-evaluated mutants alone would
+      // have cleared the configured threshold.
       throw messages.createError('error.scoreUnavailable', [
-        String(operationalErrorCount),
+        describeUnavailableScore(mutationResult),
       ])
     }
 

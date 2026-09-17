@@ -281,17 +281,18 @@ export class MutationTestingService {
   // Matches the real Stryker/mutation-testing-metrics semantics this report
   // format claims to speak: CompileError and RuntimeError are both
   // "totalInvalid" — excluded from the denominator entirely, never counted
-  // toward "totalDetected". RuntimeError in particular is minted only for a
-  // thrown, non-compile evaluate() failure (see groupExecutor.ts's
-  // classifyRuntimeError) — an infrastructure error (network, auth, poll
-  // timeout), never a genuine Apex test signal — so it must not inflate the
-  // score. Callers must additionally check hasOperationalErrors: a non-null
-  // score here does not by itself mean the run's evidence is complete.
+  // toward "totalDetected". RuntimeError is minted both for a thrown,
+  // non-compile evaluate() failure (an infrastructure error: network, auth,
+  // poll timeout — see groupExecutor.ts's classifyRuntimeError) and for a
+  // mutant whose covering tests never produced a conclusive Pass or Fail
+  // (see groupExecutor.ts's buildAttributedResult) — neither is a genuine
+  // Apex test signal, so neither must inflate the score. Callers must
+  // additionally check hasOperationalErrors: a non-null score here does not
+  // by itself mean the run's evidence is complete — this returns a plain 0
+  // when nothing was scoreable at all, which reads as "the worst possible
+  // score" rather than "unavailable" unless the caller checks that too.
   public calculateScore(mutationResult: ApexMutationTestResult) {
-    const invalidStatuses = new Set(['CompileError', 'RuntimeError'])
-    const validMutants = mutationResult.mutants.filter(
-      mutant => !invalidStatuses.has(mutant.status)
-    )
+    const validMutants = this.validMutants(mutationResult)
     if (validMutants.length === 0) {
       return 0
     }
@@ -302,12 +303,27 @@ export class MutationTestingService {
     )
   }
 
-  // True when any mutant hit an infrastructure error rather than being
-  // genuinely evaluated. A caller must treat this as "the score above cannot
-  // be trusted", not as a normal threshold-miss — see run.ts.
+  // True whenever calculateScore's result cannot be trusted as a genuine
+  // measurement: either a mutant hit a RuntimeError (an infrastructure
+  // failure, or a mutant with no conclusive per-method evidence — see
+  // above), or there are zero valid mutants to score at all. That second
+  // case is not the same as a legitimately bad score: it covers a run where
+  // every mutant failed to compile, and a run that stopped before
+  // evaluating anything (see MutationTestingService.executeMutationLoop's
+  // `incomplete` — a fully-aborted campaign can reach here with zero
+  // mutants at all). A caller must treat either case as "fail the command",
+  // not as a normal threshold-miss — see run.ts.
   public hasOperationalErrors(mutationResult: ApexMutationTestResult) {
-    return mutationResult.mutants.some(
-      mutant => mutant.status === 'RuntimeError'
+    return (
+      this.validMutants(mutationResult).length === 0 ||
+      mutationResult.mutants.some(mutant => mutant.status === 'RuntimeError')
+    )
+  }
+
+  private validMutants(mutationResult: ApexMutationTestResult) {
+    const invalidStatuses = new Set(['CompileError', 'RuntimeError'])
+    return mutationResult.mutants.filter(
+      mutant => !invalidStatuses.has(mutant.status)
     )
   }
 
@@ -796,8 +812,13 @@ export class MutationTestingService {
 
     const indexByMutation = new Map(mutations.map((m, i) => [m, i]))
     // Pre-filling with null only makes the holes explicit: every index is
-    // written below, and null slots and array holes are both skipped
-    // identically by the `filter` at the end.
+    // either written below or stays null, and null slots are skipped
+    // identically by the `filter` at the end. A mutantResults entry short of
+    // group.mutations.length (a mid-group abort — see GroupExecutor.
+    // recurseIntoSingletons) must leave the remaining indices at this
+    // default rather than writing `undefined`: `isPresent` only excludes
+    // `null`, so an `undefined` entry would survive the filter and reach the
+    // report as a malformed mutant with no fields.
     type MutantResult = ApexMutationTestResult['mutants'][number]
     // Stryker disable next-line ArrayDeclaration: pre-fill is not observable.
     const orderedResults: Array<MutantResult | null> = new Array(
@@ -813,14 +834,14 @@ export class MutationTestingService {
         loopStartTime,
         mutations.length
       )
-      // Stryker disable next-line EqualityOperator: an extra iteration reads
-      // `group.mutations[length]` as undefined, whose index lookup writes a
-      // non-index property that `filter` never visits.
-      for (let i = 0; i < group.mutations.length; ++i) {
+      // Only as many indices as mutantResults actually holds: a mid-group
+      // abort returns fewer entries than group.mutations.length, and every
+      // index past that must stay null (unattempted), never `undefined`.
+      for (let i = 0; i < mutantResults.length; ++i) {
         const idx = indexByMutation.get(group.mutations[i])!
         orderedResults[idx] = mutantResults[i]
       }
-      completed += group.mutations.length
+      completed += mutantResults.length
       // An infrastructure failure (see GroupExecutor.evaluateGroup) will
       // recur against the same broken connection: stop rather than issue
       // more doomed deploy/test-run calls for the remaining groups. Their
@@ -829,12 +850,29 @@ export class MutationTestingService {
       if (abort) break
     }
 
-    this.progress.finish({ info: 'All mutations evaluated' })
+    // Not the same thing as "the executor signalled abort": an abort on the
+    // very last group leaves nothing actually unattempted (completed ===
+    // mutations.length), and that is not an incomplete campaign — every
+    // planned mutation reached a terminal status, one of them just happens
+    // to be RuntimeError. Only a real shortfall counts.
+    const incomplete = completed < mutations.length
+
+    this.progress.finish({
+      info: incomplete
+        ? `Mutation testing incomplete: ${completed}/${mutations.length} mutations evaluated before stopping on an infrastructure error`
+        : 'All mutations evaluated',
+    })
     return {
       sourceFile: this.apexClassName,
       sourceFileContent: apexClass.Body,
       testFiles: retainedTestClassNames,
       testClassResolutions: [...this.testClassResolutions.values()],
+      ...(incomplete && {
+        incomplete: {
+          evaluatedCount: completed,
+          plannedCount: mutations.length,
+        },
+      }),
       mutants: orderedResults.filter(isPresent),
     }
   }

@@ -25,9 +25,46 @@ workflows, baseline).
 
 ## Slice 2 — Score/verdict integrity (false-green prevention)
 
-**Status: done.** All four findings below are fixed, tested, and passing in a plain clone:
-lint (197 files), full offline unit suite (104 files / 2148 tests, 100% coverage), NUT suite
-(2 files / 59 tests). See `FORK-HANDOFF.md` for the exact commands and file-level summary.
+**Status: done, including a follow-up hardening round.** All four original findings plus four
+follow-up findings from a second review pass are fixed, tested, and passing in a plain clone:
+lint (197 files), full offline unit suite (104 files / 2155 tests, 100% coverage), NUT suite
+(2 files / 62 tests). See `FORK-HANDOFF.md` for the exact commands and file-level summary.
+
+### Follow-up hardening (second review pass, same slice)
+
+1. **The summary fallback itself was still false-green-shaped.** `buildAttributedResult`
+   still let a missing per-method row (or the `myMethods.size === 0` no-coverage case) infer
+   `Killed` from the overall run's summary outcome — a summary that can be non-Passed for a
+   reason entirely unrelated to the mutant in question. Removed entirely: attribution now
+   requires a real per-method `Pass` or `Fail`; anything else (`CompileFail`, `Skip`, or a row
+   that never reports) is inconclusive and produces `RuntimeError` (reusing that status
+   deliberately — same "excluded from score, fails the command" treatment as an infrastructure
+   error, for the same reason: no conclusive evidence either way). No-coverage now always means
+   `Survived` (nothing could have caught it), never inferred `Killed`.
+2. **`hasOperationalErrors` didn't cover zero-valid-mutants.** A run where every mutant failed
+   to compile, or where literally nothing was evaluated, produced a plain `0` from
+   `calculateScore` — indistinguishable from a legitimately bad score. `hasOperationalErrors`
+   now also returns `true` whenever there are zero valid (non-`CompileError`/non-`RuntimeError`)
+   mutants, and `run.ts`'s `error.scoreUnavailable` message names which case applies (no
+   mutants evaluated at all / all evaluated mutants failed to compile / N of M hit an
+   operational error).
+3. **A real bug: `undefined` entries could survive into the report.** `executeMutationLoop`
+   assigned `orderedResults[idx] = mutantResults[i]` for every index in `group.mutations`, but
+   a mid-group abort (`recurseIntoSingletons` stopping after a child throws) returns fewer
+   entries than that — the excess indices got `mutantResults[i] === undefined` written in,
+   and `isPresent`'s `value !== null` check let `undefined` through the final filter. Fixed to
+   only assign as many indices as `mutantResults` actually holds, leaving the rest at their
+   `null` default. Also added `ApexMutationTestResult.incomplete` (`{evaluatedCount,
+   plannedCount}`, only present when a real shortfall exists — an abort on the last group with
+   nothing left over is not "incomplete"): surfaced via `this.warn` in the CLI, a banner in the
+   HTML report, and `config.incomplete` in the report's JSON data island. Regression-tested at
+   both the `GroupExecutor` unit level (exact call-count proof) and end-to-end through
+   `MutationTestingService.process()` into the real (non-mocked) `HTMLReporter` — proving the
+   partial result never crashes the reporter, not just that the executor's return value looks
+   right in isolation.
+4. **Report file was mode 0644 (world-readable).** It embeds the full class source plus every
+   covering test's identity. Changed the atomic-write default to `0600`; proven against a real
+   filesystem stat, not a mocked `writeFile` argument (`HTMLReporter.symlinkSafety.test.ts`).
 
 ### Confirmed findings (traced to source at `c3f95db`, each independently reproduced)
 

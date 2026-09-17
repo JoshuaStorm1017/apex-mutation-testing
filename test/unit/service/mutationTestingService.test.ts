@@ -1,3 +1,5 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import path from 'node:path'
 import { Messages } from '@salesforce/core'
 import { Progress, Spinner } from '@salesforce/sf-plugins-core'
 import type { ApexClassIdentity } from '../../../src/adapter/org/ApexClassIdentity.js'
@@ -12,6 +14,7 @@ import {
   RUN_TESTS,
   SKIP_TESTS,
 } from '../../../src/port/mutationTestBed.js'
+import { ApexMutationHTMLReporter } from '../../../src/reporter/HTMLReporter.js'
 import {
   MutantGenerator,
   mutatorFilterNarrows,
@@ -405,9 +408,20 @@ describe('MutationTestingService', () => {
     describe('When processing mutations', () => {
       const testCases = [
         {
+          // Real per-method evidence (a Fail row for the covering method),
+          // not the run's overall summary — attribution requires a
+          // conclusive per-method outcome and no longer falls back to the
+          // summary at all (see groupExecutor.ts's buildAttributedResult).
           description: 'when test is failing',
           testResult: {
             outcome: 'Failed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Fail',
+              },
+            ],
           } as ApexTestRunResult,
           expectedStatus: 'Killed',
           error: null,
@@ -425,6 +439,13 @@ describe('MutationTestingService', () => {
           description: 'when test is passing',
           testResult: {
             outcome: 'Passed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Pass',
+              },
+            ],
           } as ApexTestRunResult,
           expectedStatus: 'Survived',
           error: null,
@@ -2437,9 +2458,11 @@ describe('MutationTestingService', () => {
             tokenStream: mockAnalyzeFullResult.tokenStream,
           })
         )
-        // The excluded line has no covering test methods left, so the
-        // no-coverage branch falls back to the run summary ('Failed' ⇒ Killed).
-        expect(result.mutants[0].status).toBe('Killed')
+        // The excluded line has no covering test methods left — nothing
+        // could have caught this mutant, so it survives. Never inferred
+        // Killed from the run's summary outcome ('Failed' here is unrelated
+        // to this mutant; see groupExecutor.ts's buildAttributedResult).
+        expect(result.mutants[0].status).toBe('Survived')
       })
     })
 
@@ -2906,9 +2929,12 @@ describe('MutationTestingService', () => {
     describe('When checking for operational errors', () => {
       const operationalErrorTestCases = [
         {
+          // Zero mutants to score is not the same as a legitimately bad
+          // score — nothing was evaluated at all (see the `incomplete`
+          // accounting in mutationTestingService.ts), so this counts too.
           description: 'with no mutants',
           mutants: [],
-          expected: false,
+          expected: true,
         },
         {
           description: 'with only Killed and Survived mutants',
@@ -2916,9 +2942,17 @@ describe('MutationTestingService', () => {
           expected: false,
         },
         {
-          description: 'with a CompileError but no RuntimeError',
+          description: 'with a CompileError but at least one valid mutant',
           mutants: [{ status: 'Killed' }, { status: 'CompileError' }],
           expected: false,
+        },
+        {
+          // Every evaluated mutant is invalid (all failed to compile), none
+          // RuntimeError: validMutants is still empty, so this must count
+          // too, not just the RuntimeError case.
+          description: 'with only CompileError mutants',
+          mutants: [{ status: 'CompileError' }, { status: 'CompileError' }],
+          expected: true,
         },
         {
           description: 'with one RuntimeError among otherwise-real results',
@@ -3405,7 +3439,16 @@ describe('MutationTestingService', () => {
         )
         const evaluateMock = vi.fn().mockResolvedValue({
           kind: 'executed',
-          result: { outcome: 'Failed' },
+          result: {
+            outcome: 'Failed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Fail',
+              },
+            ],
+          },
         })
         const bed = fakeTestBed(
           baselineResult({
@@ -3740,7 +3783,16 @@ describe('MutationTestingService', () => {
         )
         bed.evaluate = vi.fn().mockResolvedValue({
           kind: 'executed',
-          result: { outcome: testOutcome },
+          result: {
+            outcome: testOutcome,
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: testOutcome === 'Passed' ? 'Pass' : 'Fail',
+              },
+            ],
+          },
         })
         engine.testBed = bed
       }
@@ -4449,7 +4501,16 @@ describe('MutationTestingService', () => {
         )
         bed.evaluate = vi.fn().mockResolvedValue({
           kind: 'executed',
-          result: { outcome: 'Passed' },
+          result: {
+            outcome: 'Passed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Pass',
+              },
+            ],
+          },
         })
         engine.testBed = bed
 
@@ -4482,7 +4543,16 @@ describe('MutationTestingService', () => {
         )
         bed.evaluate = vi.fn().mockResolvedValue({
           kind: 'executed',
-          result: { outcome: 'Failed' },
+          result: {
+            outcome: 'Failed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Fail',
+              },
+            ],
+          },
         })
         engine.testBed = bed
 
@@ -4518,7 +4588,16 @@ describe('MutationTestingService', () => {
         )
         bed.evaluate = vi.fn().mockResolvedValue({
           kind: 'executed',
-          result: { outcome: 'Passed' },
+          result: {
+            outcome: 'Passed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Pass',
+              },
+            ],
+          },
         })
         engine.testBed = bed
 
@@ -4559,7 +4638,16 @@ describe('MutationTestingService', () => {
         )
         bed.evaluate = vi.fn().mockResolvedValue({
           kind: 'executed',
-          result: { outcome: 'Failed' },
+          result: {
+            outcome: 'Failed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Fail',
+              },
+            ],
+          },
         })
         engine.testBed = bed
 
@@ -4678,7 +4766,16 @@ describe('MutationTestingService', () => {
         )
         const evaluateMock = vi.fn().mockResolvedValue({
           kind: 'executed',
-          result: { outcome: 'Failed' },
+          result: {
+            outcome: 'Failed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'Fail',
+              },
+            ],
+          },
         })
         const bed = fakeTestBed(
           baselineResult({
@@ -5035,6 +5132,133 @@ describe('MutationTestingService', () => {
           ['2']
         )
       })
+
+      it('Given the singleton fallback aborts on its first child (an infrastructure error, not a not-compilable verdict), When processing, Then the second child is never attempted, no undefined mutant reaches the result, incomplete accounting is correct, and the real HTML reporter does not crash on the partial result', async () => {
+        // Arrange — same two-mutation, disjoint-coverage shape as the
+        // coverage-gap test above, but the group's first evaluate() call
+        // returns not-compilable (forcing recursion, exactly like that
+        // test), and then the FIRST singleton retry throws. This is the
+        // end-to-end version of GroupExecutor's own unit test for the same
+        // scenario: it proves the shortfall this produces (mutantResults
+        // shorter than group.mutations.length) survives all the way through
+        // MutationTestingService.executeMutationLoop's index bookkeeping
+        // and the real (non-mocked) reporter without an `undefined` entry
+        // reaching either.
+        const mutationFoo = {
+          ...mockMutation,
+          mutationName: 'MFoo',
+          replacement: '0',
+          target: {
+            ...mockMutation.target,
+            startToken: { ...mockMutation.target.startToken, line: 1 },
+            endToken: { ...mockMutation.target.endToken, line: 1 },
+          },
+        }
+        const mutationBar = {
+          ...mockMutation,
+          mutationName: 'MBar',
+          replacement: '1',
+          target: {
+            ...mockMutation.target,
+            startToken: {
+              ...mockMutation.target.startToken,
+              line: 2,
+              tokenIndex: 9,
+              startIndex: 100,
+              stopIndex: 101,
+            },
+            endToken: {
+              ...mockMutation.target.endToken,
+              line: 2,
+              tokenIndex: 9,
+              startIndex: 100,
+              stopIndex: 101,
+            },
+          },
+        }
+        vi.mocked(MutantGenerator).mockImplementation(
+          class {
+            compute = vi.fn().mockReturnValue({
+              mutations: [mutationFoo, mutationBar],
+              tokenStream: {},
+            })
+            mutate = vi.fn().mockReturnValue('mutated code')
+            mutateMany = vi.fn().mockReturnValue('grouped mutated code')
+          }
+        )
+        let evaluateCallCount = 0
+        const evaluateMock = vi.fn().mockImplementation(() => {
+          ++evaluateCallCount
+          if (evaluateCallCount === 1) {
+            // Grouped batch — not-compilable forces recursion into
+            // singletons, same as the coverage-gap test above.
+            return Promise.resolve({
+              kind: 'not-compilable',
+              detail: 'Deployment failed:\nsyntax error',
+            })
+          }
+          // First singleton retry (mutationFoo): an infrastructure error,
+          // not a per-mutation fact. The second singleton (mutationBar)
+          // must never be reached.
+          return Promise.reject(new Error('ECONNRESET'))
+        })
+        const bed = fakeTestBed(
+          baselineResult({
+            outcome: 'Passed',
+            testsRan: 1,
+            testMethodsPerLine: new Map([
+              [1, new Set(['FooTest.testA'])],
+              [2, new Set(['BarTest.testA'])],
+            ]),
+          })
+        )
+        bed.evaluate = evaluateMock
+        engine.testBed = bed
+
+        const groupedTwoClassSut = new MutationTestingService(
+          progress,
+          spinner,
+          engine,
+          {
+            apexClassName: 'TestClass',
+            apexTestClassNames: ['FooTest', 'BarTest'],
+            mutationGrouping: true,
+          } as ApexMutationParameter,
+          messagesMock
+        )
+
+        // Act
+        const result = await groupedTwoClassSut.process()
+
+        // Assert — exactly the batch attempt plus the one singleton that
+        // threw; the second singleton (mutationBar) is never attempted.
+        expect(evaluateMock).toHaveBeenCalledTimes(2)
+        expect(result.mutants).toHaveLength(1)
+        expect(result.mutants[0].mutatorName).toBe('MFoo')
+        expect(result.mutants[0].status).toBe('RuntimeError')
+        expect(result.mutants.every(m => m !== undefined && m !== null)).toBe(
+          true
+        )
+        expect(result.incomplete).toEqual({
+          evaluatedCount: 1,
+          plannedCount: 2,
+        })
+
+        // Assert — the real (non-mocked) reporter, given this exact partial
+        // result shape, writes a report rather than throwing on a malformed
+        // entry.
+        const reportDir = await mkdtemp(
+          path.join(process.cwd(), '.mutation-report-abort-test-')
+        )
+        try {
+          const reporter = new ApexMutationHTMLReporter(messagesMock)
+          await expect(
+            reporter.generateReport(result, reportDir)
+          ).resolves.toBeUndefined()
+        } finally {
+          await rm(reportDir, { recursive: true, force: true })
+        }
+      })
     })
 
     describe('Given per-test attribution is computed from the success path', () => {
@@ -5157,8 +5381,16 @@ describe('MutationTestingService', () => {
         })
       })
 
-      it('Given the covering test method never reports and the run summary fails, When processing, Then the mutant is Killed but attribution.killedBy is empty', async () => {
-        // Arrange — no per-method outcome at all; status comes purely from summaryFallback
+      it('Given the covering test method never reports at all, When processing, Then the mutant is RuntimeError (inconclusive), never inferred Killed from the run summary', async () => {
+        // Arrange — no per-method outcome for the one covering method, and
+        // the overall summary happens to be 'Failed' for an unrelated
+        // reason. There is no real fallback to that summary any more (see
+        // groupExecutor.ts's buildAttributedResult) — a missing per-method
+        // row is exactly as inconclusive as a CompileFail or Skip row, and
+        // must never be scored Killed on the strength of an unrelated
+        // overall-run failure. This is the same false-green shape as the
+        // RuntimeError-from-a-thrown-error case, just at the per-method
+        // attribution layer instead of the evaluate()-call layer.
         vi.mocked(MutantGenerator).mockImplementation(
           class {
             compute = vi
@@ -5189,7 +5421,61 @@ describe('MutationTestingService', () => {
         const result = await sut.process()
 
         // Assert
-        expect(result.mutants[0].status).toBe('Killed')
+        expect(result.mutants[0].status).toBe('RuntimeError')
+        expect(result.mutants[0].statusReason).toBe(
+          'No covering test produced a conclusive Pass or Fail outcome (compile failure, skip, or missing test row)'
+        )
+        expect(result.mutants[0].attribution).toEqual({
+          coveredBy: ['TestClassTest.testMethodA'],
+          killedBy: [],
+          testsCompleted: 0,
+        })
+        // And it must not be scoreable — the whole point of the fix.
+        expect(sut.hasOperationalErrors(result)).toBe(true)
+      })
+
+      it('Given a covering method reports CompileFail or Skip (not a real Pass or Fail), When processing, Then the mutant is RuntimeError, never Survived or Killed', async () => {
+        // Arrange — the method did return a row, just not a conclusive one.
+        // Distinct from the "never reports at all" case above: this proves
+        // testsCompleted also excludes a present-but-inconclusive row, not
+        // only an absent one.
+        vi.mocked(MutantGenerator).mockImplementation(
+          class {
+            compute = vi
+              .fn()
+              .mockReturnValue({ mutations: [mockMutation], tokenStream: {} })
+            mutate = vi.fn().mockReturnValue('mutated code')
+          }
+        )
+        const bed = fakeTestBed(
+          baselineResult({
+            outcome: 'Passed',
+            testsRan: 1,
+            testMethodsPerLine: new Map([
+              [1, new Set(['TestClassTest.testMethodA'])],
+            ]),
+          })
+        )
+        bed.evaluate = vi.fn().mockResolvedValue({
+          kind: 'executed',
+          result: {
+            outcome: 'Failed',
+            tests: [
+              {
+                classId: 'TestClassTest',
+                methodName: 'testMethodA',
+                outcome: 'CompileFail',
+              },
+            ],
+          } as unknown as ApexTestRunResult,
+        })
+        engine.testBed = bed
+
+        // Act
+        const result = await sut.process()
+
+        // Assert
+        expect(result.mutants[0].status).toBe('RuntimeError')
         expect(result.mutants[0].attribution).toEqual({
           coveredBy: ['TestClassTest.testMethodA'],
           killedBy: [],

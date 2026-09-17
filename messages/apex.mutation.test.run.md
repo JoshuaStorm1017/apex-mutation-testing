@@ -190,7 +190,11 @@ Mutation score %s% is below the required threshold of %s%
 
 # error.scoreUnavailable
 
-Mutation score unavailable: %s mutant(s) could not be evaluated because of an infrastructure error (network, authentication, deploy/poll timeout, or similar) and produced no test evidence. See the HTML report for each affected mutant's reason. This is not a threshold failure - re-run once the underlying issue is resolved to get a decisive score.
+Mutation score unavailable: %s. See the HTML report for each affected mutant's reason. This is not a threshold failure - resolve the underlying issue and re-run to get a decisive score.
+
+# info.campaignIncomplete
+
+Mutation testing stopped early: %s of %s planned mutation(s) were evaluated. The remaining %s were never attempted and do not appear in the report.
 
 # info.testClassNotUsable
 

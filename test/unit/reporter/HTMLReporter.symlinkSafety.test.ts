@@ -4,6 +4,7 @@ import {
   readFile,
   readlink,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises'
@@ -77,5 +78,11 @@ describe('HTMLReporter symlink safety (real filesystem)', () => {
     // Assert — no leftover temp file from the write-then-rename sequence.
     const entries = await readdir(workDir)
     expect(entries).toEqual(['index.html'])
+
+    // Assert — real on-disk permission bits, not a mocked call argument: the
+    // report embeds the full class source plus every covering test's
+    // identity, so it defaults to owner-only (0600), not world-readable.
+    const mode = (await stat(path.join(workDir, 'index.html'))).mode & 0o777
+    expect(mode).toBe(0o600)
   })
 })

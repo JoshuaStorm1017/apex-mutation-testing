@@ -6,6 +6,17 @@ export interface ApexMutationTestResult {
   sourceFileContent: string
   testFiles: string[]
   testClassResolutions: TestClassResolution[]
+  // Present only when the campaign stopped before every planned mutation was
+  // evaluated (see GroupExecutor's circuit breaker in groupExecutor.ts) —
+  // absent means every planned mutation reached a terminal status. `mutants`
+  // never contains an entry for an unattempted mutation; this is the only
+  // place its existence and count are recorded, so a consumer (the CLI, the
+  // HTML report) can say so explicitly rather than silently reporting fewer
+  // mutants than were planned with no indication why.
+  incomplete?: {
+    evaluatedCount: number
+    plannedCount: number
+  }
   mutants: {
     id: string
     mutatorName: string

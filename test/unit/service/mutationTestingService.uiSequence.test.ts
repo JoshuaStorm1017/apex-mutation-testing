@@ -24,6 +24,11 @@ import { TypeDiscoverer } from '../../../src/service/typeDiscoverer.js'
 import { ApexMutation } from '../../../src/type/ApexMutation.js'
 import { ApexMutationParameter } from '../../../src/type/ApexMutationParameter.js'
 import type { TestClassResolutions } from '../../../src/type/TestClassResolution.js'
+import {
+  type TestMethodId,
+  testClassOf,
+  testMethodOf,
+} from '../../../src/type/TestMethodId.js'
 import { recordUiCalls, type UiRecorder } from '../../utils/testUtil.js'
 
 // This file characterises the behaviour of MutationTestingService.process()
@@ -242,10 +247,27 @@ const arrangeMutantGenerator = (
   )
 }
 
+// Default echoes back a conclusive Pass for every test method actually
+// requested — real per-method evidence, not a bare summary (see
+// groupExecutor.ts's buildAttributedResult: attribution no longer falls
+// back to the run summary at all). Reading the argument rather than
+// returning a fixed shape keeps this default correct regardless of which
+// covering method a given test's testMethodsPerLine names, so every
+// existing "the default means Survived/zombie" golden sequence keeps
+// meaning that for the right reason.
 const arrangeApexTestRunner = (
   baseline: ReturnType<typeof baselineResult>,
-  runTestMethods: () => Promise<unknown> = () =>
-    Promise.resolve({ outcome: 'Passed' })
+  runTestMethods: (tests: ReadonlySet<TestMethodId>) => Promise<unknown> = (
+    tests: ReadonlySet<TestMethodId>
+  ) =>
+    Promise.resolve({
+      outcome: 'Passed',
+      tests: [...tests].map(id => ({
+        classId: testClassOf(id),
+        methodName: testMethodOf(id),
+        outcome: 'Pass',
+      })),
+    })
 ): void => {
   vi.mocked(ApexTestRunner).mockImplementation(
     class {

@@ -15,13 +15,6 @@ import {
 import { formatRemainingTime } from './timeUtils.js'
 
 const PASS_OUTCOME = 'Pass'
-// Used only as the synthetic fallback outcome fed into `summaryFallback`'s own
-// `!== PASS_OUTCOME` check (see buildAttributedResult) when a run's summary
-// disagrees with Pass — that check does not care which non-pass string this
-// is, so any distinct one is behaviourally interchangeable there.
-// Stryker disable next-line StringLiteral: any non-pass value behaves the same
-// for that one comparison.
-const NON_PASS_OUTCOME = 'Fail'
 
 // The only per-method outcome ApexTestRunResult.tests[].outcome that is valid
 // evidence a mutant was killed. Matches @salesforce/apex-node's
@@ -283,9 +276,12 @@ export class GroupExecutor {
     }
   }
 
-  // Success path. Per-method outcomes when present (required for k>1
-  // attribution); fall back to the summary-derived outcome when the test runner
-  // did not report per-method data (legacy behaviour for k=1).
+  // Success path. Attribution is per-method only — there is no run-summary
+  // fallback (see buildAttributedResult): a summary-derived guess is not
+  // evidence, and treating it as such is exactly the false-green failure
+  // mode this fork exists to close (a summary of "not Passed" caused by one
+  // unrelated failure elsewhere in the run must never mark an unrelated
+  // method's mutant Killed).
   private attributeOutcomes(
     group: MutationGroup,
     testResult: ApexTestRunResult
@@ -299,53 +295,62 @@ export class GroupExecutor {
         t.outcome,
       ])
     )
-    const summaryFallback =
-      testResult.outcome === 'Passed' ? PASS_OUTCOME : NON_PASS_OUTCOME
     return group.mutations.map(mutation =>
-      this.buildAttributedResult(mutation, outcomeByMethod, summaryFallback)
+      this.buildAttributedResult(mutation, outcomeByMethod)
     )
   }
 
   private buildAttributedResult(
     mutation: ApexMutation,
-    outcomeByMethod: ReadonlyMap<TestMethodId, string>,
-    summaryFallback: string
+    outcomeByMethod: ReadonlyMap<TestMethodId, string>
   ): ApexMutationTestResult['mutants'][number] {
     const myMethods =
       this.testMethodsPerLine.get(mutation.target.startToken.line) ??
       new Set<TestMethodId>()
-    // No covering tests (only possible in mocked or uncovered-line scenarios)
-    // → fall back to the summary outcome so behaviour matches the legacy
-    // evaluateMutation path. Nobody to attribute the verdict to, so no
-    // attribution — emitting coveredBy: [] for a Killed mutant would be a
-    // contradiction the schema cannot express.
+    // No covering tests at all (only possible in mocked or uncovered-line
+    // scenarios) — nothing could have caught this mutant, so it survived.
+    // Never inferred Killed from the run's overall summary: that summary can
+    // be non-Passed for a reason entirely unrelated to this mutant.
     if (myMethods.size === 0) {
-      const killed = summaryFallback !== PASS_OUTCOME
-      return this.buildMutantResult(mutation, killed ? 'Killed' : 'Survived')
+      return this.buildMutantResult(mutation, 'Survived')
     }
 
     const coveredBy = [...myMethods].sort()
     const killedBy: TestMethodId[] = []
-    let testsCompleted = 0
+    let conclusivePassCount = 0
     for (const name of coveredBy) {
       const outcome = outcomeByMethod.get(name)
-      if (outcome === undefined) continue
-      testsCompleted++
-      // Allowlist, not a denylist: only a genuine Fail is a kill. A
-      // CompileFail or Skip row still "completed" (the runner returned a
-      // terminal outcome for it, so it does not fall into the
-      // someOutcomeMissing gap below) but is not evidence of anything —
-      // never attributed as a kill.
-      if (outcome === FAIL_OUTCOME) killedBy.push(name)
+      if (outcome === FAIL_OUTCOME) {
+        killedBy.push(name)
+      } else if (outcome === PASS_OUTCOME) {
+        conclusivePassCount++
+      }
+      // Anything else — CompileFail, Skip, or a method that never reported
+      // at all (outcome undefined) — is inconclusive: not evidence the
+      // mutant was killed, and not evidence it survived either. Never
+      // counted either way.
     }
-    // A method that never reported falls back to the run summary; deriving the
-    // verdict from the counts keeps it in lockstep with the attribution above,
-    // rather than re-expressing the kill rule a second way.
-    const someOutcomeMissing = testsCompleted < coveredBy.length
-    const killed =
-      killedBy.length > 0 ||
-      (someOutcomeMissing && summaryFallback !== PASS_OUTCOME)
-    return this.buildMutantResult(mutation, killed ? 'Killed' : 'Survived', {
+    const testsCompleted = killedBy.length + conclusivePassCount
+    if (killedBy.length > 0) {
+      return this.buildMutantResult(mutation, 'Killed', {
+        attribution: { coveredBy, killedBy, testsCompleted },
+      })
+    }
+    if (conclusivePassCount > 0) {
+      return this.buildMutantResult(mutation, 'Survived', {
+        attribution: { coveredBy, killedBy, testsCompleted },
+      })
+    }
+    // Every covering test was inconclusive (CompileFail, Skip, or simply
+    // never reported) — no real Pass or Fail anywhere. Reusing RuntimeError
+    // here (rather than inventing a status) puts this in the same "no
+    // conclusive evidence" bucket as an infrastructure failure: excluded
+    // from the score denominator and forces the CLI to fail rather than
+    // silently score this mutant Survived (falsely implying a real test ran
+    // clean) or Killed (there is nothing to attribute a kill to).
+    return this.buildMutantResult(mutation, 'RuntimeError', {
+      statusReason:
+        'No covering test produced a conclusive Pass or Fail outcome (compile failure, skip, or missing test row)',
       attribution: { coveredBy, killedBy, testsCompleted },
     })
   }
@@ -367,10 +372,20 @@ export class GroupExecutor {
     mutantResults: ApexMutationTestResult['mutants']
   ): string {
     if (mutantResults.length === 1) {
-      return `Mutation result: ${mutantResults[0].status === 'Survived' ? 'zombie' : 'mutant killed'}`
+      const status = mutantResults[0].status
+      if (status === 'Survived') return 'Mutation result: zombie'
+      if (status === 'Killed') return 'Mutation result: mutant killed'
+      // RuntimeError from inconclusive per-method evidence (see
+      // buildAttributedResult) — neither a kill nor a survival, so neither
+      // label applies.
+      return 'Mutation result: inconclusive (no usable test evidence)'
     }
     const killed = mutantResults.filter(r => r.status === 'Killed').length
-    return `Group of ${mutantResults.length} evaluated: ${killed} killed, ${mutantResults.length - killed} survived`
+    const survived = mutantResults.filter(r => r.status === 'Survived').length
+    const inconclusive = mutantResults.length - killed - survived
+    const inconclusiveSuffix =
+      inconclusive > 0 ? `, ${inconclusive} inconclusive` : ''
+    return `Group of ${mutantResults.length} evaluated: ${killed} killed, ${survived} survived${inconclusiveSuffix}`
   }
 
   private buildMutantResult(
