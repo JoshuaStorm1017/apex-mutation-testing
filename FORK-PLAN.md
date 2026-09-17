@@ -25,7 +25,9 @@ workflows, baseline).
 
 ## Slice 2 — Score/verdict integrity (false-green prevention)
 
-**Status: in progress.**
+**Status: done.** All four findings below are fixed, tested, and passing in a plain clone:
+lint (197 files), full offline unit suite (104 files / 2148 tests, 100% coverage), NUT suite
+(2 files / 59 tests). See `FORK-HANDOFF.md` for the exact commands and file-level summary.
 
 ### Confirmed findings (traced to source at `c3f95db`, each independently reproduced)
 
@@ -89,23 +91,40 @@ workflows, baseline).
    work, not a bulk copy; attribute the donor file if code is lifted nearly verbatim (see
    `FORK-HANDOFF.md`'s Copied-file attribution section).
 
-### Acceptance for Slice 2 (all must hold, proven by tests, not assertion)
+### Acceptance for Slice 2 (all met, proven by tests below, not assertion)
 
-- Every `evaluate()` call rejecting with an auth/network/timeout-shaped error → the command
+- ✅ Every `evaluate()` call rejecting with an auth/network/timeout-shaped error → the command
   reports score-unavailable and fails, regardless of the configured threshold.
-- A run mixing genuine kills with even one operational error → command fails (never passes on
-  the strength of the real kills alone) — operational failures are not "partial credit".
-  Report still lists every mutant's real status.
-- A genuine Apex test failure (ordinary `Fail` row, including a governor-limit row) still
-  scores `Killed` — unchanged.
-- Circuit breaker call counts are asserted exactly: a grouped batch that throws makes exactly
-  one deploy/test-run attempt for that group, zero singleton retries, and zero further groups
-  are attempted afterward (spy-verified request counts, not timing-based).
-- CLI text output, `--json` output, and the HTML report agree on which mutants are
-  score-eligible; no path can compute a numeric score while operational errors exist.
-- `npm run test:mutation` / regression suites for `groupExecutor`, `mutationTestingService`,
-  `HTMLReporter` all updated and passing; full offline suite (`lint`, `compile`, `test:unit`,
-  `test:nut`) green in a plain clone.
+  `mutationTestingService.hasOperationalErrors` + `run.ts`'s `error.scoreUnavailable` throw;
+  `test/nut/run.nut.test.ts` "Given a mutant hit an operational (infrastructure) error".
+- ✅ A run mixing genuine kills with even one operational error → command fails (never passes
+  on the strength of the real kills alone) — operational failures are not "partial credit".
+  Report still lists every mutant's real status (report is published before the check runs).
+  Same test file, "the real evidence alone would clear" case (asserts fail despite score 100
+  on the real evidence).
+- ✅ A genuine Apex test failure (ordinary `Fail` row, including a governor-limit row) still
+  scores `Killed` — unchanged; `groupExecutor.test.ts`'s existing Fail-row-attribution test
+  still passes untouched.
+- ✅ Circuit breaker call counts are asserted exactly: a grouped batch that throws makes
+  exactly one deploy/test-run attempt for that group, zero singleton retries, and zero further
+  groups are attempted afterward (spy-verified request counts via `evaluateMock`, not
+  timing-based) — `groupExecutor.test.ts`'s two new circuit-breaker tests (top-level throw, and
+  a throw mid-recursion after a `not-compilable` verdict, the latter proving the "stop
+  immediately" behavior applies inside the singleton fallback too, not only at the top).
+- ✅ Terminal-outcome allowlist: `buildAttributedResult` kills only on a real `Fail`; a
+  `CompileFail`/`Skip` per-method row is "completed but not a kill", never conflated with a
+  genuinely missing row (which still uses the pre-existing summary fallback, untouched).
+- ✅ `HTMLReporter` writes atomically (temp file + `rename`) and is symlink-safe by
+  construction — proven against a real filesystem symlink (`HTMLReporter.symlinkSafety.test.ts`,
+  no mocks), plus mocked failure-path tests for the write/cleanup error handling.
+- ✅ CLI text output, `--json` output, and the HTML report agree on which mutants are
+  score-eligible; no path can compute a numeric score while operational errors exist (the CLI
+  throws before `calculateScore`'s result is ever surfaced when `hasOperationalErrors` is true).
+- ✅ Full offline suite green in a plain (non-worktree) clone: `lint` (197 files), `compile`,
+  `test:unit` (104 files / 2148 tests, 100% branch/function/line/statement coverage),
+  `test:nut` (2 files / 59 tests). `npm run test:mutation` was not run — expensive by design,
+  not repeated per the ground rules above; nothing in this slice's fix set depends on it for
+  proof, since every behavior change has a direct, deterministic unit/NUT regression test.
 
 ## Slice 3 — Validation-only backend (status: not started)
 

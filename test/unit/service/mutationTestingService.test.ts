@@ -2836,28 +2836,30 @@ describe('MutationTestingService', () => {
           expectedScore: 0,
         },
         {
-          description: 'with runtime errors counted as killed in score',
+          description:
+            'with runtime errors excluded from score (infrastructure failure, not a kill)',
           mutants: [
             { status: 'Killed' },
             { status: 'Survived' },
             { status: 'RuntimeError' },
           ],
-          expectedScore: 66.66666666666666,
+          expectedScore: 50,
         },
         {
-          description: 'with only runtime errors',
+          description: 'with only runtime errors (no valid evidence at all)',
           mutants: [{ status: 'RuntimeError' }, { status: 'RuntimeError' }],
-          expectedScore: 100,
+          expectedScore: 0,
         },
         {
-          description: 'with mixed compile and runtime errors',
+          description:
+            'with mixed compile and runtime errors, both excluded from the denominator',
           mutants: [
             { status: 'Killed' },
             { status: 'CompileError' },
             { status: 'RuntimeError' },
             { status: 'Survived' },
           ],
-          expectedScore: 66.66666666666666,
+          expectedScore: 50,
         },
         {
           description: 'with only Pending mutants (all valid, none killed)',
@@ -2897,6 +2899,52 @@ describe('MutationTestingService', () => {
 
           // Assert
           expect(score).toBe(expectedScore)
+        }
+      )
+    })
+
+    describe('When checking for operational errors', () => {
+      const operationalErrorTestCases = [
+        {
+          description: 'with no mutants',
+          mutants: [],
+          expected: false,
+        },
+        {
+          description: 'with only Killed and Survived mutants',
+          mutants: [{ status: 'Killed' }, { status: 'Survived' }],
+          expected: false,
+        },
+        {
+          description: 'with a CompileError but no RuntimeError',
+          mutants: [{ status: 'Killed' }, { status: 'CompileError' }],
+          expected: false,
+        },
+        {
+          description: 'with one RuntimeError among otherwise-real results',
+          mutants: [{ status: 'Killed' }, { status: 'RuntimeError' }],
+          expected: true,
+        },
+        {
+          description: 'with only RuntimeErrors',
+          mutants: [{ status: 'RuntimeError' }, { status: 'RuntimeError' }],
+          expected: true,
+        },
+      ]
+
+      it.each(operationalErrorTestCases)(
+        'should report $expected $description',
+        ({ mutants, expected }) => {
+          // Arrange
+          const mockResult = {
+            sourceFile: 'TestClass',
+            sourceFileContent: 'content',
+            testFiles: ['TestClassTest'],
+            mutants,
+          } as ApexMutationTestResult
+
+          // Act & Assert
+          expect(sut.hasOperationalErrors(mockResult)).toBe(expected)
         }
       )
     })

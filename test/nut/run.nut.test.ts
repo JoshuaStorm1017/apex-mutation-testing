@@ -173,6 +173,7 @@ describe('apex mutation test run NUT', () => {
           mutants: [{ status: 'Killed' }, { status: 'Survived' }],
         } as never)
         calculateScore = vi.fn().mockReturnValue(50)
+        hasOperationalErrors = vi.fn().mockReturnValue(false)
       }
     )
     vi.mocked(ApexMutationHTMLReporter).mockImplementation(
@@ -1348,6 +1349,7 @@ describe('apex mutation test run NUT', () => {
             mutants: [{ status: 'Killed' }, { status: 'Survived' }],
           } as never)
           calculateScore = vi.fn().mockReturnValue(50)
+          hasOperationalErrors = vi.fn().mockReturnValue(false)
         }
       )
 
@@ -1359,6 +1361,82 @@ describe('apex mutation test run NUT', () => {
         'error.thresholdNotMet',
         ['50', '80']
       )
+    })
+  })
+
+  describe('Given a mutant hit an operational (infrastructure) error', () => {
+    it('When running with no threshold configured, Then the command fails with error.scoreUnavailable rather than reporting a score', async () => {
+      // Arrange — one genuine kill alongside one RuntimeError: a real
+      // signal exists, but the run must still fail rather than report a
+      // partial score, per the false-green-prevention fix.
+      vi.mocked(MutationTestingService).mockImplementation(
+        class {
+          process = vi.fn().mockResolvedValue({
+            sourceFile: 'MyClass',
+            sourceFileContent: 'class MyClass {}',
+            testFiles: ['MyClassTest'],
+            mutants: [{ status: 'Killed' }, { status: 'RuntimeError' }],
+          } as never)
+          calculateScore = vi.fn().mockReturnValue(100)
+          hasOperationalErrors = vi.fn().mockReturnValue(true)
+        }
+      )
+
+      // Act & Assert
+      await expect(
+        runCommand(['-c', 'MyClass', '-t', 'MyClassTest'])
+      ).rejects.toThrow('error.scoreUnavailable')
+      expect(mockMessages.createError).toHaveBeenCalledWith(
+        'error.scoreUnavailable',
+        ['1']
+      )
+    })
+
+    it('When running with a threshold configured that the real evidence alone would clear, Then the command still fails rather than passing on partial credit', async () => {
+      // Arrange — score would be 100% on the real evidence alone (well
+      // above any threshold); the operational error must still fail the
+      // command outright.
+      vi.mocked(MutationTestingService).mockImplementation(
+        class {
+          process = vi.fn().mockResolvedValue({
+            sourceFile: 'MyClass',
+            sourceFileContent: 'class MyClass {}',
+            testFiles: ['MyClassTest'],
+            mutants: [{ status: 'Killed' }, { status: 'RuntimeError' }],
+          } as never)
+          calculateScore = vi.fn().mockReturnValue(100)
+          hasOperationalErrors = vi.fn().mockReturnValue(true)
+        }
+      )
+
+      // Act & Assert
+      await expect(
+        runCommand(['-c', 'MyClass', '-t', 'MyClassTest'], { threshold: 10 })
+      ).rejects.toThrow('error.scoreUnavailable')
+    })
+
+    it('When running with --dry-run, Then no operational-error check runs and the command does not throw', async () => {
+      // Arrange — dry-run never deploys or evaluates a mutant, so
+      // hasOperationalErrors must never even be consulted.
+      const hasOperationalErrors = vi.fn().mockReturnValue(true)
+      vi.mocked(MutationTestingService).mockImplementation(
+        class {
+          process = vi.fn().mockResolvedValue({
+            sourceFile: 'MyClass',
+            sourceFileContent: 'class MyClass {}',
+            testFiles: ['MyClassTest'],
+            mutants: [{ id: 'MyClass-0', status: 'Pending' }],
+          } as never)
+          calculateScore = vi.fn()
+          hasOperationalErrors = hasOperationalErrors
+        }
+      )
+
+      // Act & Assert
+      await expect(
+        runDryRunCommand(['-c', 'MyClass', '-t', 'MyClassTest'])
+      ).resolves.not.toThrow()
+      expect(hasOperationalErrors).not.toHaveBeenCalled()
     })
   })
 

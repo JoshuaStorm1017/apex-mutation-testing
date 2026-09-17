@@ -278,18 +278,36 @@ export class MutationTestingService {
     return groups
   }
 
+  // Matches the real Stryker/mutation-testing-metrics semantics this report
+  // format claims to speak: CompileError and RuntimeError are both
+  // "totalInvalid" — excluded from the denominator entirely, never counted
+  // toward "totalDetected". RuntimeError in particular is minted only for a
+  // thrown, non-compile evaluate() failure (see groupExecutor.ts's
+  // classifyRuntimeError) — an infrastructure error (network, auth, poll
+  // timeout), never a genuine Apex test signal — so it must not inflate the
+  // score. Callers must additionally check hasOperationalErrors: a non-null
+  // score here does not by itself mean the run's evidence is complete.
   public calculateScore(mutationResult: ApexMutationTestResult) {
+    const invalidStatuses = new Set(['CompileError', 'RuntimeError'])
     const validMutants = mutationResult.mutants.filter(
-      mutant => mutant.status !== 'CompileError'
+      mutant => !invalidStatuses.has(mutant.status)
     )
     if (validMutants.length === 0) {
       return 0
     }
-    const killedStatuses = new Set(['Killed', 'RuntimeError'])
     return (
-      (validMutants.filter(mutant => killedStatuses.has(mutant.status)).length /
+      (validMutants.filter(mutant => mutant.status === 'Killed').length /
         validMutants.length) *
       100
+    )
+  }
+
+  // True when any mutant hit an infrastructure error rather than being
+  // genuinely evaluated. A caller must treat this as "the score above cannot
+  // be trusted", not as a normal threshold-miss — see run.ts.
+  public hasOperationalErrors(mutationResult: ApexMutationTestResult) {
+    return mutationResult.mutants.some(
+      mutant => mutant.status === 'RuntimeError'
     )
   }
 
@@ -789,7 +807,7 @@ export class MutationTestingService {
     const loopStartTime = performance.now()
 
     for (const group of groups) {
-      const mutantResults = await executor.evaluate(
+      const { mutantResults, abort } = await executor.evaluate(
         group,
         completed,
         loopStartTime,
@@ -803,6 +821,12 @@ export class MutationTestingService {
         orderedResults[idx] = mutantResults[i]
       }
       completed += group.mutations.length
+      // An infrastructure failure (see GroupExecutor.evaluateGroup) will
+      // recur against the same broken connection: stop rather than issue
+      // more doomed deploy/test-run calls for the remaining groups. Their
+      // mutations stay `null` in orderedResults and are filtered out of the
+      // report below — never evaluated, so there is nothing to report.
+      if (abort) break
     }
 
     this.progress.finish({ info: 'All mutations evaluated' })
@@ -811,8 +835,6 @@ export class MutationTestingService {
       sourceFileContent: apexClass.Body,
       testFiles: retainedTestClassNames,
       testClassResolutions: [...this.testClassResolutions.values()],
-      // Stryker disable next-line MethodExpression: no null slots remain, so
-      // filtering and not filtering yield the same array — see `isPresent`.
       mutants: orderedResults.filter(isPresent),
     }
   }

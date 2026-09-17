@@ -211,6 +211,24 @@ export default class ApexMutationTest extends SfCommand<ApexMutationTestResult> 
 
     await this.publishReport(mutationResult, resolvedParameters.reportDir)
 
+    if (
+      !resolvedParameters.dryRun &&
+      mutationTestingService.hasOperationalErrors(mutationResult)
+    ) {
+      // An infrastructure error (network, auth, poll timeout) makes the
+      // evidence for at least one mutant incomplete — the report above still
+      // lists every mutant's real status and reason, but no numeric score
+      // can be trusted, and the command must fail regardless of whether the
+      // remaining, genuinely-evaluated mutants alone would have cleared the
+      // configured threshold. See mutationTestingService.calculateScore.
+      const operationalErrorCount = mutationResult.mutants.filter(
+        m => m.status === 'RuntimeError'
+      ).length
+      throw messages.createError('error.scoreUnavailable', [
+        String(operationalErrorCount),
+      ])
+    }
+
     const score = resolvedParameters.dryRun
       ? null
       : mutationTestingService.calculateScore(mutationResult)

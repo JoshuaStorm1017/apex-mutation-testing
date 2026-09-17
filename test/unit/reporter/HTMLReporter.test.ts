@@ -1,4 +1,4 @@
-import { readFile, realpath, writeFile } from 'node:fs/promises'
+import { readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { Messages } from '@salesforce/core'
 import { ApexMutationHTMLReporter } from '../../../src/reporter/HTMLReporter.js'
@@ -165,10 +165,13 @@ describe('HTMLReporter', () => {
       // Act
       await sut.generateReport(testResults)
 
-      // Assert
+      // Assert — written to a temp file first (see the rename tests below for
+      // why: the final path is reached only via rename(), never a direct
+      // writeFile(), so a symlink at the final path is never followed)
       expect(writeFile).toHaveBeenCalledWith(
         expect.any(String),
-        expect.stringContaining('<html>')
+        expect.stringContaining('<html>'),
+        expect.objectContaining({ mode: 0o644 })
       )
     })
 
@@ -176,9 +179,12 @@ describe('HTMLReporter', () => {
       // Act — no outputDir supplied, so the default must be used
       await sut.generateReport(testResults)
 
-      // Assert
-      const [target] = vi.mocked(writeFile).mock.calls[0]
-      expect(target).toBe(path.join(process.cwd(), 'reports', 'index.html'))
+      // Assert — the temp file written by writeFile is renamed onto the
+      // final path; rename() never follows a symlink already at that path.
+      expect(rename).toHaveBeenCalledWith(
+        expect.any(String),
+        path.join(process.cwd(), 'reports', 'index.html')
+      )
     })
 
     it('Then reads the mutation-testing-elements bundle as utf8 text', async () => {
@@ -218,10 +224,32 @@ describe('HTMLReporter', () => {
       await sut.generateReport(testResults, '.')
 
       // Assert
-      expect(writeFile).toHaveBeenCalledWith(
-        path.join(process.cwd(), 'index.html'),
-        expect.stringContaining('<html>')
+      expect(rename).toHaveBeenCalledWith(
+        expect.any(String),
+        path.join(process.cwd(), 'index.html')
       )
+    })
+
+    it('Given writing the temp file fails, When generating report, Then the error propagates and the temp file is cleaned up', async () => {
+      // Arrange
+      const writeError = new Error('ENOSPC: no space left on device')
+      vi.mocked(writeFile).mockRejectedValueOnce(writeError)
+      vi.mocked(unlink).mockResolvedValueOnce(undefined)
+
+      // Act & Assert
+      await expect(sut.generateReport(testResults)).rejects.toThrow(writeError)
+      expect(unlink).toHaveBeenCalledWith(expect.any(String))
+      expect(rename).not.toHaveBeenCalled()
+    })
+
+    it('Given renaming the temp file fails and cleanup also fails, When generating report, Then the rename error still propagates, not the cleanup error', async () => {
+      // Arrange
+      const renameError = new Error('EPERM: operation not permitted')
+      vi.mocked(rename).mockRejectedValueOnce(renameError)
+      vi.mocked(unlink).mockRejectedValueOnce(new Error('cleanup also failed'))
+
+      // Act & Assert
+      await expect(sut.generateReport(testResults)).rejects.toThrow(renameError)
     })
 
     it('Then marks Pending mutants as untested', async () => {

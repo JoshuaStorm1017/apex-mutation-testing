@@ -118,7 +118,39 @@ Cross-checked against the real Stryker semantics this report format claims to im
 `totalInvalid`, alongside `CompileError` — never counted toward `totalDetected`. Upstream's
 own scoring formula disagrees with the schema it emits.
 
-See `FORK-PLAN.md` for the fix design (exclude `RuntimeError` from the valid-mutant
-denominator; fail the command outright rather than silently reporting a number when any
-mutant hits an operational error; a grouped-batch failure must not retry doomed singleton
-network calls) and its current implementation status.
+**Status: done.** Four findings fixed and tested (full detail and file-level notes in
+`FORK-PLAN.md`):
+
+1. `calculateScore` now excludes `RuntimeError` from the valid-mutant denominator (matching
+   `CompileError` and the real Stryker/`mutation-testing-metrics` semantics), and
+   `run.ts` fails the command outright — via a new `hasOperationalErrors` check and
+   `error.scoreUnavailable` — whenever any mutant is `RuntimeError`, regardless of the
+   configured threshold or how the real evidence alone would have scored.
+2. `GroupExecutor` circuit-breaks on a thrown (`'threw'`) outcome: classifies the whole group
+   in one shot with zero further calls, and signals `executeMutationLoop` to stop evaluating
+   remaining groups — including mid-recursion, when a singleton retry (triggered by an
+   unrelated `not-compilable`/coverage-gap ambiguity) itself throws.
+3. `buildAttributedResult`'s per-method kill check is now an allowlist (`outcome ===
+   'Fail'`, matching `@salesforce/apex-node`'s real `ApexTestResultOutcome` enum) rather than
+   a denylist (`outcome !== 'Pass'`) — a `CompileFail` or `Skip` row no longer counts as a
+   kill.
+4. `HTMLReporter.generateReport` writes to a temp file and `rename`s it onto the final path
+   (atomic, and symlink-safe by construction — `rename()` never follows a symlink at its
+   destination) instead of writing through the final path directly.
+
+Findings 1 and 2 were traced independently from `DESIGN.md` and source, cross-checked against
+`node_modules/mutation-testing-metrics`'s real scoring semantics, and further sharpened by a
+Codex ("Sol") read-only review Josh commissioned in parallel on the same source paths (score
+taxonomy and the grouping/attribution seams); its guidance on the circuit-breaker's call-count
+behavior and on not repeating expensive suites unnecessarily is reflected above. Findings 3
+and 4 came from a separate Codex quick-review pass against the compiled `lib/` in disposable
+fixtures (no org, no source edits) — verified independently here against the real
+`@salesforce/apex-node` `ApexTestResultOutcome` enum (`Pass`/`Fail`/`CompileFail`/`Skip` — no
+`Aborted` value exists in this SDK version, so the fix does not invent one) before coding.
+
+Proof, in a plain (non-worktree) clone at the commit landing this fix: `npm run lint` (197
+files), `npm run compile`, `npm run test:unit` (104 files / 2148 tests, 100% branch/function/
+line/statement coverage — up from the 103/2136 baseline), `npm run test:nut` (2 files / 59
+tests — up from 2/56). `HTMLReporter.symlinkSafety.test.ts` is a new, deliberately
+un-mocked-fs test proving the symlink fix against a real filesystem symlink, not just a mocked
+`realpath`.

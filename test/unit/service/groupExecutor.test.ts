@@ -121,7 +121,12 @@ describe('GroupExecutor', () => {
       const sut = buildSut(testMethodsPerLine)
 
       // Act
-      const results = await sut.evaluate(group, 5, performance.now(), 12)
+      const { mutantResults: results } = await sut.evaluate(
+        group,
+        5,
+        performance.now(),
+        12
+      )
 
       // Assert
       expect(results.map(r => r.status)).toEqual([
@@ -234,7 +239,12 @@ describe('GroupExecutor', () => {
       )
 
       // Act
-      const results = await sut.evaluate(group, 0, performance.now(), 12)
+      const { mutantResults: results } = await sut.evaluate(
+        group,
+        0,
+        performance.now(),
+        12
+      )
 
       // Assert
       expect(results.map(r => r.status)).toEqual([
@@ -246,6 +256,49 @@ describe('GroupExecutor', () => {
         ([, payload]) => (payload as { info: string }).info
       )
       expect(infos).toContainEqual(expect.stringContaining('fallback'))
+    })
+
+    it('When a singleton retry within the recursion itself throws, Then the fallback stops immediately, no further singletons are attempted, and abort propagates', async () => {
+      // Arrange — the batch first resolves not-compilable (forcing
+      // recursion), then the very first singleton retry hits an
+      // infrastructure error. The remaining two singletons in the group
+      // must never be attempted: evaluate() is called exactly twice (the
+      // original batch, then the one singleton that threw), never four
+      // times (batch + all three singletons).
+      const evaluateMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          kind: 'not-compilable',
+          detail: 'Deployment failed:\nsyntax error',
+        })
+        .mockRejectedValueOnce(new Error('ECONNRESET'))
+      const sut = new GroupExecutor(
+        CLASS_NAME,
+        CLASS_BODY,
+        {} as CommonTokenStream,
+        testMethodsPerLine,
+        {
+          mutateMany: vi.fn().mockReturnValue(MUTATED_BODY),
+        } as unknown as MutantGenerator,
+        { evaluate: evaluateMock } as unknown as MutationTestBed,
+        progress,
+        { getMessage: vi.fn(() => 'fallback') } as unknown as Messages<string>
+      )
+
+      // Act
+      const { mutantResults: results, abort } = await sut.evaluate(
+        group,
+        0,
+        performance.now(),
+        12
+      )
+
+      // Assert
+      expect(abort).toBe(true)
+      expect(evaluateMock).toHaveBeenCalledTimes(2)
+      expect(results).toHaveLength(1)
+      expect(results[0].status).toBe('RuntimeError')
+      expect(results[0].statusReason).toBe('ECONNRESET')
     })
   })
 
@@ -268,7 +321,12 @@ describe('GroupExecutor', () => {
       const sut = buildSut(testMethodsPerLine)
 
       // Act
-      const results = await sut.evaluate(group, 0, performance.now(), 1)
+      const { mutantResults: results } = await sut.evaluate(
+        group,
+        0,
+        performance.now(),
+        1
+      )
 
       // Assert
       expect(results.map(r => r.status)).toEqual(['Survived'])
@@ -305,7 +363,12 @@ describe('GroupExecutor', () => {
       )
 
       // Act
-      const results = await sut.evaluate(group, 0, performance.now(), 1)
+      const { mutantResults: results } = await sut.evaluate(
+        group,
+        0,
+        performance.now(),
+        1
+      )
 
       // Assert
       expect(results.map(r => r.status)).toEqual(['CompileError'])
@@ -324,7 +387,12 @@ describe('GroupExecutor', () => {
       const sut = buildSut(testMethodsPerLine)
 
       // Act
-      const results = await sut.evaluate(group, 0, performance.now(), 1)
+      const { mutantResults: results } = await sut.evaluate(
+        group,
+        0,
+        performance.now(),
+        1
+      )
 
       // Assert
       expect(results.map(r => r.status)).toEqual(['RuntimeError'])
@@ -360,7 +428,12 @@ describe('GroupExecutor', () => {
       const sut = buildSut(testMethodsPerLine)
 
       // Act
-      const results = await sut.evaluate(group, 0, performance.now(), 1)
+      const { mutantResults: results } = await sut.evaluate(
+        group,
+        0,
+        performance.now(),
+        1
+      )
 
       // Assert
       expect(results.map(r => r.status)).toEqual(['Killed'])

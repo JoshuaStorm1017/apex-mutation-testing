@@ -15,12 +15,25 @@ import {
 import { formatRemainingTime } from './timeUtils.js'
 
 const PASS_OUTCOME = 'Pass'
-// The non-pass branch's literal value is never itself observed: every consumer
-// (buildAttributedResult) only tests `!== 'Pass'`, so any distinct non-pass
-// string is behaviourally interchangeable — 'Fail' is chosen for readability
-// during debugging, not correctness.
-// Stryker disable next-line StringLiteral: any non-pass value behaves the same.
+// Used only as the synthetic fallback outcome fed into `summaryFallback`'s own
+// `!== PASS_OUTCOME` check (see buildAttributedResult) when a run's summary
+// disagrees with Pass — that check does not care which non-pass string this
+// is, so any distinct one is behaviourally interchangeable there.
+// Stryker disable next-line StringLiteral: any non-pass value behaves the same
+// for that one comparison.
 const NON_PASS_OUTCOME = 'Fail'
+
+// The only per-method outcome ApexTestRunResult.tests[].outcome that is valid
+// evidence a mutant was killed. Matches @salesforce/apex-node's
+// ApexTestResultOutcome.Fail (an executed assertion/exception failure) — the
+// domain type keeps `outcome: string` rather than importing the vendor enum
+// (see ApexTestRunResult.ts; only apexTestRunner.ts imports @salesforce/apex-node),
+// so the literal is duplicated here deliberately, not re-derived. A
+// CompileFail row (the test class itself failed to compile, e.g. because a
+// mutation broke a signature the test class depends on) or a Skip row is not
+// evidence anything was exercised, let alone killed; neither is a row that
+// never reported at all. Only a genuine Fail counts.
+const FAIL_OUTCOME = 'Fail'
 
 // Classify a caught evaluate() failure into a RuntimeError outcome plus a
 // progress message. Apex runtime exception text carries no localisation risk
@@ -76,7 +89,16 @@ export class GroupExecutor {
     completedSoFar: number,
     loopStartTime: number,
     totalMutations: number
-  ): Promise<ApexMutationTestResult['mutants']> {
+  ): Promise<{
+    mutantResults: ApexMutationTestResult['mutants']
+    // True once an evaluate() call has thrown — an infrastructure failure
+    // (network, auth, poll timeout; see classifyRuntimeError) that will
+    // recur on every subsequent group against the same broken connection.
+    // The caller (mutationTestingService.executeMutationLoop) stops
+    // evaluating further groups when this is true, rather than burning more
+    // doomed deploy/test-run calls.
+    abort: boolean
+  }> {
     const remainingText = formatRemainingTime(
       loopStartTime,
       completedSoFar,
@@ -84,7 +106,7 @@ export class GroupExecutor {
     )
     this.announceGroup(group, remainingText, completedSoFar)
 
-    const { mutantResults, progressMessage } = await this.evaluateGroup(
+    const { mutantResults, progressMessage, abort } = await this.evaluateGroup(
       group,
       completedSoFar
     )
@@ -98,7 +120,7 @@ export class GroupExecutor {
     this.progress.update(newCompleted, {
       info: `${updatedRemainingText}${progressMessage}`,
     })
-    return mutantResults
+    return { mutantResults, abort }
   }
 
   private announceGroup(
@@ -149,6 +171,7 @@ export class GroupExecutor {
   ): Promise<{
     mutantResults: ApexMutationTestResult['mutants']
     progressMessage: string
+    abort: boolean
   }> {
     const mutated = this.mutantGenerator.mutateMany(
       group.mutations,
@@ -156,11 +179,32 @@ export class GroupExecutor {
     )
     const outcome = await this.runGroup(mutated, group.testMethods)
 
-    // For k>1, an outcome that is not a clean execution — a thrown batch
-    // error or a non-compiling mutant — or a coverage gap (test runner did
-    // not report every expected method) makes attribution ambiguous.
-    // Recurse with each mutation as its own singleton group; each child call
-    // hits the leaf and either succeeds or classifies its outcome directly.
+    // A thrown outcome is, by construction, an infrastructure failure (see
+    // classifyRuntimeError) — never a per-mutation compile or attribution
+    // ambiguity. Retrying it as N singleton groups would only issue N more
+    // doomed calls against the same broken connection, and — before this
+    // classification existed — would have multiplied a single infra blip
+    // into every mutation in the group being separately (mis)classified.
+    // Classify the whole group in one shot, with zero further calls, and
+    // signal the caller to stop the campaign rather than try the next group.
+    if (outcome.kind === 'threw') {
+      const c = classifyRuntimeError(outcome.error)
+      return {
+        mutantResults: group.mutations.map(mutation =>
+          this.buildMutantResult(mutation, c.status, {
+            statusReason: c.statusReason,
+          })
+        ),
+        progressMessage: c.progressMessage,
+        abort: true,
+      }
+    }
+
+    // For k>1, a non-compiling mutant or a coverage gap (test runner did not
+    // report every expected method) makes attribution ambiguous — but is a
+    // per-mutation fact, not evidence anything else is broken. Recurse with
+    // each mutation as its own singleton group; each child call hits a leaf
+    // and either succeeds or classifies its own outcome directly.
     if (
       group.mutations.length > 1 &&
       (outcome.kind !== 'executed' ||
@@ -181,20 +225,7 @@ export class GroupExecutor {
           }),
         ],
         progressMessage: `Mutation result: compile error at line ${mutation.target.startToken.line}`,
-      }
-    }
-
-    // Leaf for k=1 with a caught error: classify it directly.
-    if (outcome.kind === 'threw') {
-      const mutation = group.mutations[0]
-      const c = classifyRuntimeError(outcome.error)
-      return {
-        mutantResults: [
-          this.buildMutantResult(mutation, c.status, {
-            statusReason: c.statusReason,
-          }),
-        ],
-        progressMessage: c.progressMessage,
+        abort: false,
       }
     }
 
@@ -202,17 +233,23 @@ export class GroupExecutor {
     return {
       mutantResults,
       progressMessage: this.buildGroupProgressMessage(mutantResults),
+      abort: false,
     }
   }
 
   // Re-evaluates each mutation in the group as its own singleton group,
   // aggregating the leaf results into one fallback outcome for the caller.
+  // Stops as soon as a singleton aborts (its own evaluate() threw): the same
+  // infrastructure failure would doom every remaining singleton in this
+  // group too, so they are left unattempted rather than issuing more calls
+  // against a connection already known to be broken.
   private async recurseIntoSingletons(
     group: MutationGroup,
     completedSoFar: number
   ): Promise<{
     mutantResults: ApexMutationTestResult['mutants']
     progressMessage: string
+    abort: boolean
   }> {
     this.progress.update(completedSoFar, {
       info: this.messages.getMessage('info.groupingFallback', [
@@ -226,15 +263,23 @@ export class GroupExecutor {
         // extractCoveredLines guarantees the line is in the map.
         testMethods: this.testMethodsPerLine.get(m.target.startToken.line)!,
       }
-      const { mutantResults } = await this.evaluateGroup(
+      const { mutantResults, abort } = await this.evaluateGroup(
         singleton,
         completedSoFar
       )
       fallbackResults.push(...mutantResults)
+      if (abort) {
+        return {
+          mutantResults: fallbackResults,
+          progressMessage: `Fallback for group of ${group.mutations.length} aborted after an infrastructure error`,
+          abort: true,
+        }
+      }
     }
     return {
       mutantResults: fallbackResults,
       progressMessage: `Fallback for group of ${group.mutations.length} complete`,
+      abort: false,
     }
   }
 
@@ -286,7 +331,12 @@ export class GroupExecutor {
       const outcome = outcomeByMethod.get(name)
       if (outcome === undefined) continue
       testsCompleted++
-      if (outcome !== PASS_OUTCOME) killedBy.push(name)
+      // Allowlist, not a denylist: only a genuine Fail is a kill. A
+      // CompileFail or Skip row still "completed" (the runner returned a
+      // terminal outcome for it, so it does not fall into the
+      // someOutcomeMissing gap below) but is not evidence of anything —
+      // never attributed as a kill.
+      if (outcome === FAIL_OUTCOME) killedBy.push(name)
     }
     // A method that never reported falls back to the run summary; deriving the
     // verdict from the counts keeps it in lockstep with the attribution above,

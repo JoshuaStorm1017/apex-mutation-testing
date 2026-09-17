@@ -1,4 +1,5 @@
-import { readFile, realpath, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
+import { readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import type { Messages } from '@salesforce/core'
 import * as path from 'path'
@@ -74,7 +75,7 @@ export class ApexMutationHTMLReporter {
     const reportData = this.transformApexResults(apexMutationTestResult)
     const bundle = await loadMutationTestElements()
     const htmlContent = createReportHtml(reportData, bundle)
-    await writeFile(path.join(resolvedDir, 'index.html'), htmlContent)
+    await writeReportAtomically(resolvedDir, htmlContent)
   }
 
   private transformApexResults(
@@ -249,6 +250,39 @@ async function assertRealPathWithinCwd(
         realCwd,
       ])
     )
+  }
+}
+
+// The directory-level checks above (resolveSafeOutputDir,
+// assertRealPathWithinCwd) only validate `resolvedDir` itself — they say
+// nothing about whether `index.html` inside it is already a symlink. A
+// `reports/index.html -> /outside/target` symlink planted before the run
+// would otherwise have its *target* silently overwritten by a plain
+// `writeFile(finalPath, ...)`, escaping the directory check entirely.
+// `rename()` never follows a symlink at its destination — on POSIX it
+// replaces the directory entry itself — so writing to a fresh temp file in
+// the same directory and renaming it over the final path is symlink-safe by
+// construction, not just atomic. The temp name is random so two concurrent
+// report writes (unlikely, but free to guard) never collide.
+async function writeReportAtomically(
+  resolvedDir: string,
+  content: string
+): Promise<void> {
+  const finalPath = path.join(resolvedDir, 'index.html')
+  const tmpPath = path.join(
+    resolvedDir,
+    `.index.html.tmp-${randomBytes(8).toString('hex')}`
+  )
+  try {
+    await writeFile(tmpPath, content, { mode: 0o644 })
+    await rename(tmpPath, finalPath)
+  } catch (error: unknown) {
+    await unlink(tmpPath).catch(() => {
+      // Best-effort cleanup only: the write/rename failure above is the
+      // error that matters, and a missing tmp file (the common case, when
+      // writeFile itself failed) would otherwise mask it with ENOENT.
+    })
+    throw error
   }
 }
 

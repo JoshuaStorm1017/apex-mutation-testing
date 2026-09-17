@@ -188,6 +188,10 @@ Group of %s mutations failed batch deploy — re-evaluating individually
 
 Mutation score %s% is below the required threshold of %s%
 
+# error.scoreUnavailable
+
+Mutation score unavailable: %s mutant(s) could not be evaluated because of an infrastructure error (network, authentication, deploy/poll timeout, or similar) and produced no test evidence. See the HTML report for each affected mutant's reason. This is not a threshold failure - re-run once the underlying issue is resolved to get a decisive score.
+
 # info.testClassNotUsable
 
 Skipping test class '%s'%s: %s.
