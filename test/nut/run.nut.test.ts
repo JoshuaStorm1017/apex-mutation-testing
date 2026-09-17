@@ -113,9 +113,13 @@ vi.mock('../../src/service/testSuiteResolver.js', () => ({
 }))
 vi.mock('../../src/adapter/org/orgEngine.js', () => ({
   createOrgEngine: vi.fn(),
+  createValidationOrgEngine: vi.fn(),
 }))
 
-import { createOrgEngine } from '../../src/adapter/org/orgEngine.js'
+import {
+  createOrgEngine,
+  createValidationOrgEngine,
+} from '../../src/adapter/org/orgEngine.js'
 import { default as ApexMutationTest } from '../../src/commands/apex/mutation/test/run.js'
 import {
   ApexClassAmbiguousError,
@@ -151,6 +155,7 @@ describe('apex mutation test run NUT', () => {
       testBed: {},
     }
     vi.mocked(createOrgEngine).mockResolvedValue(engine)
+    vi.mocked(createValidationOrgEngine).mockResolvedValue(engine)
     mockConfigReaderResolve.mockImplementation((...args: unknown[]) =>
       Promise.resolve(args[0])
     )
@@ -1523,6 +1528,53 @@ describe('apex mutation test run NUT', () => {
       expect(sut.warn).toHaveBeenCalledWith(
         'Mutation testing stopped early: 1 of 3 planned mutation(s) were evaluated. The remaining 2 were never attempted and do not appear in the report.'
       )
+    })
+  })
+
+  describe('Given the validate-only flag', () => {
+    it('When running without --validate-only, Then createOrgEngine is used and createValidationOrgEngine is never called', async () => {
+      // Act
+      await runCommand(['-c', 'MyClass', '-t', 'MyClassTest'])
+
+      // Assert
+      expect(createOrgEngine).toHaveBeenCalledTimes(1)
+      expect(createValidationOrgEngine).not.toHaveBeenCalled()
+    })
+
+    it('When running with --validate-only, Then createValidationOrgEngine is used and createOrgEngine is never called', async () => {
+      // Act
+      await runCommand(['-c', 'MyClass', '-t', 'MyClassTest'], {
+        'validate-only': true,
+      })
+
+      // Assert
+      expect(createValidationOrgEngine).toHaveBeenCalledTimes(1)
+      expect(createOrgEngine).not.toHaveBeenCalled()
+    })
+
+    it('When running with --validate-only and --mutation-grouping together, Then the command fails with error.validationModeGroupingUnsupported before any perimeter or org call', async () => {
+      // Act & Assert
+      await expect(
+        runCommand(['-c', 'MyClass', '-t', 'MyClassTest'], {
+          'validate-only': true,
+          'mutation-grouping': true,
+        })
+      ).rejects.toThrow('error.validationModeGroupingUnsupported')
+      expect(mockMessages.createError).toHaveBeenCalledWith(
+        'error.validationModeGroupingUnsupported'
+      )
+      expect(ApexClassValidator).not.toHaveBeenCalled()
+      expect(MutationTestingService).not.toHaveBeenCalled()
+    })
+
+    it('When running with --mutation-grouping but without --validate-only, Then it is not rejected', async () => {
+      // Act & Assert — grouping is only unsupported paired with
+      // --validate-only; the original backend supports it unchanged.
+      await expect(
+        runCommand(['-c', 'MyClass', '-t', 'MyClassTest'], {
+          'mutation-grouping': true,
+        })
+      ).resolves.not.toThrow()
     })
   })
 

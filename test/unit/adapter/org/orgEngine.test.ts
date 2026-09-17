@@ -6,9 +6,13 @@ import { ApexTestSuiteRepository } from '../../../../src/adapter/org/apexTestSui
 import { EntityDefinitionRepository } from '../../../../src/adapter/org/entityDefinitionRepository.js'
 import { OrgApexSourceProvider } from '../../../../src/adapter/org/orgApexSourceProvider.js'
 import { OrganizationRepository } from '../../../../src/adapter/org/organizationRepository.js'
-import { createOrgEngine } from '../../../../src/adapter/org/orgEngine.js'
+import {
+  createOrgEngine,
+  createValidationOrgEngine,
+} from '../../../../src/adapter/org/orgEngine.js'
 import { OrgMutationTestBed } from '../../../../src/adapter/org/orgMutationTestBed.js'
 import { OrgSObjectSchemaProvider } from '../../../../src/adapter/org/orgSObjectSchemaProvider.js'
+import { ValidationOrgMutationTestBed } from '../../../../src/adapter/org/validationMutationTestBed.js'
 import type { EngineContext } from '../../../../src/port/executionEngine.js'
 
 vi.mock('../../../../src/adapter/org/apexClassRepository.js')
@@ -210,5 +214,74 @@ describe('createOrgEngine', () => {
     ]
     expect(notice.error).toBeInstanceOf(Error)
     expect(notice.error?.message).toContain('boom')
+  })
+})
+
+describe('createValidationOrgEngine', () => {
+  let ctx: EngineContext
+  const orgNamespace = 'acme'
+
+  beforeEach(() => {
+    ctx = {
+      connection: {} as Connection,
+      notify: vi.fn(),
+    }
+    vi.mocked(OrganizationRepository).mockImplementation(
+      class {
+        readNamespacePrefix = vi.fn().mockResolvedValue(orgNamespace)
+        isSandbox = vi.fn().mockResolvedValue(true)
+      } as unknown as new (
+        connection: Connection
+      ) => OrganizationRepository
+    )
+  })
+
+  it('Given an engine context, When creating the validation org engine, Then the test bed is a ValidationOrgMutationTestBed, never an OrgMutationTestBed', async () => {
+    // Act
+    const engine = await createValidationOrgEngine(ctx)
+
+    // Assert
+    expect(engine.testBed).toBeInstanceOf(ValidationOrgMutationTestBed)
+    expect(vi.mocked(OrgMutationTestBed)).not.toHaveBeenCalled()
+  })
+
+  it('Given an engine context, When creating the validation org engine, Then source and schema are composed exactly as they are for the original engine', async () => {
+    // Act
+    await createValidationOrgEngine(ctx)
+
+    // Assert — same source-composition call shape as createOrgEngine: the
+    // ApexClassRepository instance reaches OrgApexSourceProvider (reads
+    // only), the suite/entity repositories are built from the connection,
+    // and the schema provider gets the connection, notify and namespace.
+    expect(vi.mocked(ApexClassRepository)).toHaveBeenCalledTimes(1)
+    const repositoryInstance = vi.mocked(ApexClassRepository).mock.instances[0]
+    expect(vi.mocked(OrgApexSourceProvider).mock.calls[0][0]).toBe(
+      repositoryInstance
+    )
+    expect(vi.mocked(OrgSObjectSchemaProvider)).toHaveBeenCalledWith(
+      ctx.connection,
+      ctx.notify,
+      orgNamespace
+    )
+  })
+
+  it('Given an engine context, When creating the validation org engine, Then exactly one ApexTestRunner is constructed and reused for coverage reads', async () => {
+    // Act
+    await createValidationOrgEngine(ctx)
+
+    // Assert
+    expect(vi.mocked(ApexTestRunner)).toHaveBeenCalledTimes(1)
+  })
+
+  it('Given an engine context, When creating the validation org engine, Then an OrganizationRepository is built from the connection for the sandbox-safety check', async () => {
+    // Act
+    await createValidationOrgEngine(ctx)
+
+    // Assert — OrganizationRepository is constructed twice here (once for
+    // the shared namespace read, once passed into the bed for its own
+    // isSandbox check) — both from the same connection, never a second org.
+    expect(vi.mocked(OrganizationRepository)).toHaveBeenCalledWith(
+      ctx.connection
+    )
   })
 })

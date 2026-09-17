@@ -163,35 +163,98 @@ lint (197 files), full offline unit suite (104 files / 2155 tests, 100% coverage
   not repeated per the ground rules above; nothing in this slice's fix set depends on it for
   proof, since every behavior change has a direct, deterministic unit/NUT regression test.
 
-## Slice 3 — Validation-only backend (status: not started)
+## Slice 3 — Validation-only backend (status: core landed, README/preflight pending)
 
-Add an explicit validation/check-only mode through `MutationTestBed`/`EngineBundle`, distinct
-from upstream's existing `--dry-run` (which still means "estimate only, no deploy at all").
-Validation mode performs a **check-only deployment with tests** (Metadata API
-`checkOnly: true`, `IsRunTests: true` via `ContainerAsyncRequest`, or the tooling-API
-equivalent) for both the baseline and every mutant — never a real (non-check-only) update,
-never the original-backend `restore()`/rollback path, including the grouping-fallback cleanup
-path. No silent fallback to the real backend on any unsupported feature — an incompatible
-combination (e.g. grouping, if per-method attribution can't be proven safe under check-only
-semantics) must produce a clear, typed error, not a silent behavior change.
+**Design (verified against installed jsforce/apex-node types, not assumed):** the Tooling
+API's `MetadataContainer`/`ContainerAsyncRequest` deploy the original backend uses
+(`apexClassRepository.ts`) has no check-only mode at all — only the Metadata API's
+`Connection.metadata.deploy(zip, { checkOnly: true, ... })` does. So validation mode uses a
+second, independent transport, `ValidationOrgMutationTestBed`
+(`src/adapter/org/validationMutationTestBed.ts`), implementing the exact same `MutationTestBed`
+port as the original `OrgMutationTestBed` — `GroupExecutor` and `MutationTestingService` never
+know which one is wired in. New pieces:
 
-Key open question to resolve before writing code: how `RunSpecifiedTests` maps under
-check-only — upstream's per-method `TestMethodId` (`classId.methodName`) selection assumes a
-real deploy's Metadata API deploy-with-tests semantics; confirm whether check-only deploys
-support the same per-method `RunSpecifiedTests` selection or only class-level "run these
-classes" semantics, and if the latter, do not claim per-method attribution the backend can't
-actually prove — gate/error instead of inventing coverage.
+- `src/adapter/org/validationDeployPackage.ts` — builds the Metadata API deploy zip (a
+  `package.xml` + one `classes/{Name}.cls` + its `.cls-meta.xml`) using `yazl` (new direct
+  dependency, MIT, one tiny transitive dep `buffer-crc32`, also MIT — no zip library existed in
+  this repo's dependency tree and hand-rolling one was judged riskier than a well-vetted
+  library given no live org can ever validate a hand-rolled format is actually correct).
+  `yauzl` + `@types/yauzl`/`@types/yazl` are devDependencies used only to round-trip and
+  byte-verify the zip in tests (`validationDeployPackage.test.ts`) — proof against a real,
+  independently-written unzip implementation, not just yazl's own self-consistency.
+- `src/adapter/org/organizationRepository.ts` gained `isSandbox()` (`Organization.IsSandbox`),
+  fails closed (returns `false`, i.e. "treat as production") on any missing/ambiguous
+  response — the "reject unknown/production for validation mode" requirement.
+- `ValidationOrgMutationTestBed.prepare()`: (1) refuses a non-sandbox org before any deploy;
+  (2) check-only deploys the *original* body with `testLevel: 'RunSpecifiedTests'` and
+  `runTests` set to the (de-duplicated) test-class perimeter; (3) `assertTrustworthy()` gates
+  the result strictly — non-terminal, non-`checkOnly` (a hard invariant, asserted even though
+  the request always sends `checkOnly: true`, in case a mock or future refactor breaks that),
+  `runTestsEnabled: false`, a missing `runTestResult`, `numTestsRun <= 0`, or an internally
+  inconsistent count (`numTestsRun` vs `successes.length + failures.length`, or `numFailures`
+  vs `failures.length`) all throw `ValidationDeployInconclusiveError` before anything is
+  trusted as evidence; (4) a target-class component error throws the existing, generic
+  `CompilationCheckFailedError` — unchanged downstream handling; (5) **coverage is read via
+  the existing, unmodified `ApexTestRunner.getTestMethodsPerLines()`** (a real Tooling API
+  read, entirely independent of the check-only deploy) — never from
+  `RunTestsResult.codeCoverage`, because that field reports `locationsNotCovered` and a
+  `numLocations` count but never the covered line numbers themselves, so there is no honest
+  way to derive `coveredLines: number[]` from it (confirmed against the installed
+  `@jsforce/jsforce-node` schema types, not assumed). Inventing that mapping was the one thing
+  explicitly ruled out; reusing the real, already-correct coverage read sidesteps it entirely
+  while keeping whatever fidelity (`per-test` or `aggregate`) the org already supports.
+- `evaluate()` check-only deploys the mutated body the same way and maps
+  `RunTestsResult.successes`/`failures` (which *do* carry per-method `id`/`methodName`) into
+  the existing `ApexTestRunResult` domain shape — `GroupExecutor`'s existing Fail-only-kills
+  allowlist (from Slice 2) consumes it identically to the Tooling API transport, unaware which
+  one ran.
+- `restore()` is a true no-op (a check-only deploy is never committed, so there is nothing to
+  roll back) — proven, not asserted: `validationMutationTestBed.noPermanentMutation.test.ts`
+  runs the real `MutationTestingService` + real `GroupExecutor` + real
+  `ValidationOrgMutationTestBed` together (nothing about the orchestration is mocked, only the
+  jsforce `Connection`, the coverage read and the org-safety/settings reads are) across five
+  scenarios — clean survive, clean kill, a thrown infrastructure error, a refused production
+  org, and an inconclusive baseline — and asserts `checkOnly: true` on *every* recorded deploy
+  call in each, plus the exact expected call count (2, 2, 2, 0, 1 respectively), proving
+  restore adds no deploy of its own on any path, success or failure.
+- **Known, documented fidelity/cost tradeoffs for this version** (all deliberate, none
+  silent): (1) the Metadata API's `runTests` selects at class granularity only — there is no
+  per-method equivalent of the Tooling API's `TestItem[]`, so `evaluate()` cannot narrow to
+  just a mutant's covering tests and re-runs the full stored perimeter every time; (2)
+  `--mutation-grouping` is rejected outright in validation mode
+  (`error.validationModeGroupingUnsupported`, checked in `run.ts` after config-file resolution,
+  before any org call) — grouping's DSATUR batching needs precise per-test coverage sets to
+  prove two mutations' covering tests never overlap, and this fork is not yet confident that
+  holds when every deploy call also always runs the full perimeter regardless of grouping;
+  (3) a test class itself failing to compile during the baseline check-only deploy fails the
+  *whole* baseline (`CompilationCheckFailedError`) rather than the original backend's
+  finer-grained per-class drop-and-continue — mapping a Metadata API `DeployMessage` back to a
+  `BaselineCompileFailure`'s org-Id-keyed `classId` would need a name→Id resolution this bed
+  does not have available, and inventing one felt like exactly the kind of fabrication this
+  fork exists to avoid; failing the whole baseline instead is a stricter, honest fallback, not
+  a silent one.
+- CLI wiring: `--validate-only` (`src/commands/apex/mutation/test/run.ts`), distinct from
+  `--dry-run` (which still means "estimate only, never deploy at all" — unchanged upstream
+  meaning). Selects `createValidationOrgEngine` (`src/adapter/org/orgEngine.ts`) instead of
+  `createOrgEngine` — identical `source`/`schema` construction, only `testBed` differs; the
+  `ApexClassRepository` instance validation mode still needs for *reading* source is never
+  handed to `ValidationOrgMutationTestBed`, which has no way to reach its `update()` (the real,
+  permanent Tooling API deploy) at all — structural, not just documented.
 
-Baseline and per-mutant strictness for validation mode: require a *completed* check-only
-result with `checkOnly: true` and positive executed-test evidence; malformed/auth-failed/
-zero-tests-executed/coverage-only/compile-failed/failing-baseline outcomes all stop before any
-mutant is evaluated, same spirit as Slice 2's operational-error handling but enforced at the
-validation-mode boundary specifically.
+**Verified:** lint (202 files), compile, unit tests (107 files / 2200 tests, 100% coverage),
+NUT (2 files / 66 tests) — all green in a plain clone. No live org exists for this work and
+none was used; every claim above is proven with injected/mocked transports (real
+`MutationTestingService`/`GroupExecutor` orchestration, fake jsforce `Connection`) and a
+real-library zip round-trip, never a live Salesforce deploy.
 
-Will use narrow, explicit interface extensions to the existing ports where necessary (not a
-parallel copy of the whole backend) and adapt (not bulk-copy) the donor's isolated-source /
-bounded-process / atomic-output / org-safety patterns where they still apply to upstream's
-architecture. Proven with spies and an injected transport — no live org, ever.
+**Not yet done (remaining Slice 3/4 work):** README fork-clarity section documenting
+`--validate-only`'s experimental status and install instructions; preflight diagnostics in
+plugin style; installed-tarball/plugin smoke tests; the generic technical-review brief (data
+flow, permissions, budgets, cancellation, uninstall, "offline proof vs. pending sandbox
+acceptance"). No sandbox/scratch-org acceptance test has been run against this backend — it
+cannot be, no such org is available here — so `--validate-only` must be described everywhere
+as unverified-against-a-real-org, proven only by the injected-transport tests above, until
+someone with sandbox access runs it for real.
 
 ## Slice 4 — Output/symlink protection, preflight diagnostics, plugin smoke tests, README
 

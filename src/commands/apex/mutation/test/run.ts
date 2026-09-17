@@ -1,6 +1,9 @@
 import { Messages } from '@salesforce/core'
 import { Flags, SfCommand } from '@salesforce/sf-plugins-core'
-import { createOrgEngine } from '../../../../adapter/org/orgEngine.js'
+import {
+  createOrgEngine,
+  createValidationOrgEngine,
+} from '../../../../adapter/org/orgEngine.js'
 import {
   ApexClassAmbiguousError,
   ApexClassNotFoundError,
@@ -125,6 +128,10 @@ export default class ApexMutationTest extends SfCommand<ApexMutationTestResult> 
       summary: messages.getMessage('flags.dry-run.summary'),
       default: false,
     }),
+    'validate-only': Flags.boolean({
+      summary: messages.getMessage('flags.validate-only.summary'),
+      default: false,
+    }),
     'include-mutators': Flags.string({
       summary: messages.getMessage('flags.include-mutators.summary'),
       exclusive: ['exclude-mutators'],
@@ -174,18 +181,24 @@ export default class ApexMutationTest extends SfCommand<ApexMutationTestResult> 
   public async run(): Promise<ApexMutationTestResult> {
     const { flags } = await this.parse(ApexMutationTest)
     const connection = flags['target-org'].getConnection(flags['api-version'])
+    const validateOnly = flags['validate-only']
 
-    const engine = await createOrgEngine({
+    const ctx = {
       connection,
-      notify: notice => reportEngineNotice(notice, this.spinner, messages),
-    })
+      notify: (notice: Parameters<typeof reportEngineNotice>[0]) =>
+        reportEngineNotice(notice, this.spinner, messages),
+    }
+    const engine = await (validateOnly
+      ? createValidationOrgEngine(ctx)
+      : createOrgEngine(ctx))
 
-    return this.mutate(engine, flags)
+    return this.mutate(engine, flags, validateOnly)
   }
 
   private async mutate(
     engine: EngineBundle,
-    flags: Awaited<ReturnType<ApexMutationTest['parse']>>['flags']
+    flags: Awaited<ReturnType<ApexMutationTest['parse']>>['flags'],
+    validateOnly: boolean
   ): Promise<ApexMutationTestResult> {
     const parameters: ApexMutationParameter = {
       apexClassName: flags['apex-class'],
@@ -208,6 +221,18 @@ export default class ApexMutationTest extends SfCommand<ApexMutationTestResult> 
       parameters,
       engine.source
     )
+
+    // Checked after config-file resolution (grouping can come from either
+    // the CLI flag or .mutation-testing.json), and before any org call:
+    // grouping's DSATUR batching relies on precise per-test coverage sets to
+    // prove two mutations' covering tests never overlap, and validation
+    // mode's check-only deploy can only select tests at class granularity —
+    // see validationMutationTestBed.ts's evaluate() for why. Gated here
+    // rather than silently ignoring the flag.
+    if (validateOnly && resolvedParameters.mutationGrouping) {
+      throw messages.createError('error.validationModeGroupingUnsupported')
+    }
+
     this.logRunningLine(resolvedParameters)
 
     const { usable, resolutions } = await this.reduceToUsablePerimeter(

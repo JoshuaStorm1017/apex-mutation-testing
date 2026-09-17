@@ -70,4 +70,44 @@ describe('OrganizationRepository', () => {
       expect(result).toBeNull()
     })
   })
+
+  describe('when reading whether the org is a sandbox', () => {
+    it('Given a sandbox org, When checking isSandbox, Then it resolves true through a plain, non-Tooling query', async () => {
+      // Arrange
+      queryMock.mockResolvedValue({ records: [{ IsSandbox: true }] })
+
+      // Act
+      const result = await sut.isSandbox()
+
+      // Assert
+      expect(result).toBe(true)
+      expect(queryMock).toHaveBeenCalledWith(
+        'SELECT IsSandbox FROM Organization'
+      )
+    })
+
+    it('Given a production org, When checking isSandbox, Then it resolves false', async () => {
+      // Arrange
+      queryMock.mockResolvedValue({ records: [{ IsSandbox: false }] })
+
+      // Act
+      const result = await sut.isSandbox()
+
+      // Assert
+      expect(result).toBe(false)
+    })
+
+    // Fail closed: an org that returns no row at all must never be treated
+    // as safe for validation mode.
+    it('Given the query returns no Organization row, When checking isSandbox, Then it resolves false rather than throwing', async () => {
+      // Arrange
+      queryMock.mockResolvedValue({ records: [] })
+
+      // Act
+      const result = await sut.isSandbox()
+
+      // Assert
+      expect(result).toBe(false)
+    })
+  })
 })

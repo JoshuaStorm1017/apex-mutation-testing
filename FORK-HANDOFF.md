@@ -92,7 +92,7 @@ substantive donor implementation (e.g. symlink-safe atomic output writing, a pre
 diagnostics shape), this section will name the donor file, the fork file it lands in, and add
 the donor's MIT notice to that file's header, per the task's licensing requirement.
 
-## Slice 2 — score/verdict integrity (status: in progress, see `FORK-PLAN.md`)
+## Slice 2 — score/verdict integrity (status: done, see `FORK-PLAN.md`)
 
 Traced upstream's verdict taxonomy end-to-end at `c3f95db` and found a real false-green
 scoring defect, independent of anything in the donor:
@@ -154,3 +154,43 @@ line/statement coverage — up from the 103/2136 baseline), `npm run test:nut` (
 tests — up from 2/56). `HTMLReporter.symlinkSafety.test.ts` is a new, deliberately
 un-mocked-fs test proving the symlink fix against a real filesystem symlink, not just a mocked
 `realpath`.
+
+## Slice 3 — validation-only backend (status: core done, README/preflight pending, see `FORK-PLAN.md`)
+
+Added an experimental `--validate-only` mode: every deploy — baseline and every mutant —
+becomes a Metadata API check-only deployment (`checkOnly: true`, `testLevel:
+'RunSpecifiedTests'`), never a real one. New files: `src/adapter/org/validationDeployPackage.ts`
+(builds the deploy zip via a new `yazl` dependency), `src/adapter/org/validationMutationTestBed.ts`
+(implements the existing `MutationTestBed` port — `GroupExecutor`/`MutationTestingService` are
+completely unaware which backend is wired in), `organizationRepository.ts`'s new `isSandbox()`
+(refuses production before any deploy), and `createValidationOrgEngine` in `orgEngine.ts`. CLI
+flag wired in `run.ts`, distinct from `--dry-run`; `--mutation-grouping` is explicitly rejected
+together with `--validate-only` (not silently ignored).
+
+Coverage for this mode deliberately still comes from the existing, unmodified
+`ApexTestRunner.getTestMethodsPerLines()` (a real Tooling API read) rather than the Metadata
+API deploy's own `RunTestsResult.codeCoverage`, which — confirmed against the installed
+`@jsforce/jsforce-node` type definitions, not assumed — reports not-covered lines and a total
+count but never the covered line numbers themselves, so there was no honest way to derive real
+coverage from it. Using the existing read instead of inventing one was the key design decision
+that unblocked this slice; see `FORK-PLAN.md`'s Slice 3 section for the full trace and the
+documented fidelity/cost tradeoffs (class-level, not method-level, test selection; grouping
+unsupported for now; a test-class compile failure fails the whole baseline rather than
+dropping just that class).
+
+Proof that `restore()` and the rest of the orchestration never issue a real deploy is a
+dedicated end-to-end test (`validationMutationTestBed.noPermanentMutation.test.ts`) running the
+*real* `MutationTestingService` + `GroupExecutor` + `ValidationOrgMutationTestBed` together —
+nothing about the orchestration itself is mocked — across five scenarios (survive, kill, a
+thrown infrastructure error, a refused production org, an inconclusive baseline), asserting
+`checkOnly: true` on every recorded deploy call and the exact expected call count in each.
+
+Verified: lint (202 files), compile, unit tests (107 files / 2200 tests, 100% coverage), NUT
+(2 files / 66 tests) — all green in a plain clone. No live org exists or was used; every claim
+is proven with injected/mocked transports and a real-library (`yauzl`) zip-content round-trip,
+never a live Salesforce deploy. `--validate-only` has **not** been run against a real sandbox
+or scratch org and must not be described as verified beyond that until someone with org access
+does so.
+
+**Not yet done:** README fork-clarity section, preflight diagnostics, installed-tarball smoke
+tests, the technical-review brief (Slice 4).

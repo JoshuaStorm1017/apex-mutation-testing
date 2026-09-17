@@ -128,6 +128,14 @@ No mutations could be generated for '%s'. %s line(s) are eligible but no enabled
 
 Preview mutations without deploying or running tests
 
+# flags.validate-only.summary
+
+EXPERIMENTAL (fork-only, not upstream): run every deploy as a Metadata API check-only deployment - baseline and every mutant - so nothing is ever permanently applied to the org. Distinct from --dry-run, which estimates without deploying at all; --validate-only still deploys and runs real tests, but only as a validation, never a commit. Requires a sandbox or scratch org (refuses production). Not compatible with --mutation-grouping in this version. Per-mutant test selection is class-level only, not method-level - see README.md's validation-mode section for the fidelity/cost tradeoffs.
+
+# error.validationModeGroupingUnsupported
+
+--validate-only does not support --mutation-grouping yet: grouping relies on precise per-test coverage sets to prove two mutations' covering tests never overlap, and the Metadata API check-only deploy this mode uses can only select tests at class granularity, not per method. Run without --mutation-grouping, or without --validate-only.
+
 # error.compilabilityCheckFailed
 
 The Apex class '%s' does not compile on the target org. This can happen when a dependency was modified after the class was last deployed. Fix compilation errors before running mutation testing.\nError: %s

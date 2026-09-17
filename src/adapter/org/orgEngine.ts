@@ -8,6 +8,7 @@ import { OrgApexSourceProvider } from './orgApexSourceProvider.js'
 import { OrganizationRepository } from './organizationRepository.js'
 import { OrgMutationTestBed } from './orgMutationTestBed.js'
 import { OrgSObjectSchemaProvider } from './orgSObjectSchemaProvider.js'
+import { ValidationOrgMutationTestBed } from './validationMutationTestBed.js'
 
 const toError = (value: unknown): Error =>
   value instanceof Error ? value : new Error(String(value))
@@ -84,5 +85,36 @@ export const createOrgEngine = async (
       orgNamespace
     ),
     testBed: buildTestBed(ctx, apexClassRepository, apexTestRunner),
+  }
+}
+
+// The validation-mode counterpart to createOrgEngine — identical `source`
+// and `schema` (reading class source and describing SObject fields needs no
+// change for validation mode; only how a mutant is deployed and verdicted
+// does), swapping only `testBed` for ValidationOrgMutationTestBed. Reusing
+// `ApexClassRepository` here is deliberately narrow: only `source` (read
+// paths) touches it. ValidationOrgMutationTestBed never receives it and has
+// no way to reach ApexClassRepository.update() — the real, permanent
+// Tooling API deploy — at all; see FORK-PLAN.md's Slice 3 section for why
+// that separation is load-bearing, not incidental.
+export const createValidationOrgEngine = async (
+  ctx: EngineContext
+): Promise<EngineBundle> => {
+  const apexClassRepository = new ApexClassRepository(ctx.connection)
+  const apexTestRunner = buildTestRunner(ctx)
+  const orgNamespace = await readOrgNamespace(ctx)
+  return {
+    source: buildSourceProvider(ctx, apexClassRepository, orgNamespace),
+    schema: new OrgSObjectSchemaProvider(
+      ctx.connection,
+      ctx.notify,
+      orgNamespace
+    ),
+    testBed: new ValidationOrgMutationTestBed(
+      ctx.connection,
+      apexTestRunner,
+      new OrganizationRepository(ctx.connection),
+      new ApexSettingsRepository(ctx.connection)
+    ),
   }
 }
